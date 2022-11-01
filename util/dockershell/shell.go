@@ -239,7 +239,10 @@ func (s *Shell) Pipe(out io.Writer, commands ...[]string) *Shell {
 		s.r.Logf(">>> Running: %v\n", args)
 		cmd := s.Command(args[0], args[1:]...)
 		cmd.Stdin = lastStdout
-		pr, pw := io.Pipe()
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			s.fatal("failed to create pipe: %v", err)
+		}
 		if i == len(commands)-1 {
 			cmd.Stdout = out
 		} else {
@@ -248,11 +251,10 @@ func (s *Shell) Pipe(out io.Writer, commands ...[]string) *Shell {
 		}
 		cmd.Stderr = s.r.Stderr()
 		eg.Go(func() error {
+			defer pw.Close()
 			if err := cmd.Run(); err != nil {
-				pw.CloseWithError(err)
 				return err
 			}
-			pw.Close()
 			return nil
 		})
 	}
