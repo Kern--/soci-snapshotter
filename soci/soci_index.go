@@ -58,29 +58,30 @@ const (
 	minLayerSize = 10 << 20
 	// default build tool identier
 	defaultBuildToolIdentifier = "AWS SOCI CLI v0.1"
+	// emptyJSONObjectDigest is the digest of the content "{}".
+	emptyJSONObjectDigest = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 )
 
 var (
 	errNotLayerType           = errors.New("not a layer mediaType")
 	errUnsupportedLayerFormat = errors.New("unsupported layer format")
+	// defaultConfigContent is the content of the config object used when serializing
+	// a SOCI index as an OCI 1.0 Manifest for fallback compatability. OCI 1.0 Manifests
+	// require a non-empty config object, so we use the empty JSON object.
+	defaultConfigContent = []byte("{}")
+	// defaultConfigDescriptor is the descriptor of the of the config object used when
+	// serializing a SOCI index as an OCI 1.0 Manifest for fallback compatibility.
+	defaultConfigDescriptor = ocispec.Descriptor{
+		// The Config's media type is set to `SociIndexArtifactType` so that the oras-go
+		// library can use it to filter artifacts. This would normally be handled using the
+		// `ArtifactType` filed of an OCI 1.1 Artifact.
+		MediaType: SociIndexArtifactType,
+		Digest:    emptyJSONObjectDigest,
+		Size:      2,
+	}
 )
 
-// Index represents an ORAS/OCI Artifact Manifest
-type Index struct {
-	// The media type of the manifest
-	MediaType string `json:"mediaType"`
-
-	// Artifact type of the manifest
-	ArtifactType string `json:"artifactType"`
-
-	// Blobs referenced by the manifest
-	Blobs []ocispec.Descriptor `json:"blobs,omitempty"`
-
-	Subject *ocispec.Descriptor `json:"subject,omitempty"`
-
-	// Optional annotations in the manifest
-	Annotations map[string]string `json:"annotations,omitempty"`
-}
+type Index ocispec.Artifact
 
 type IndexWithMetadata struct {
 	Index       *Index
@@ -92,6 +93,60 @@ type IndexWithMetadata struct {
 type IndexDescriptorInfo struct {
 	ocispec.Descriptor
 	CreatedAt time.Time
+}
+
+// DecodeIndex deserializes a JSON blob in an io.Reader
+// into a SOCI index. The blob can be either an OCI 1.1 Artifact
+// or an OCI 1.0 Manifest
+func DecodeIndex(r io.Reader, index *Index) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	return UnmarshalIndex(b, index)
+}
+
+// UnmarshalIndex deserializes a JSON blob in a byte array
+// into a SOCI index. The blob can be either an OCI 1.1 Artifact
+// or an OCI 1.0 Manifest
+func UnmarshalIndex(b []byte, index *Index) error {
+	err := json.Unmarshal(b, index)
+	if err == nil && index.MediaType == ocispec.MediaTypeArtifactManifest {
+		return nil
+	}
+	var manifest ocispec.Manifest
+	err = json.Unmarshal(b, &manifest)
+	if err == nil {
+		fromManifest(manifest, index)
+		return nil
+	}
+	return err
+}
+
+// fromManifest converts and OCI 1.0 Manifest to a SOCI Index
+func fromManifest(manifest ocispec.Manifest, index *Index) {
+	index.MediaType = manifest.MediaType
+	index.ArtifactType = SociIndexArtifactType
+	index.Blobs = manifest.Layers
+	index.Subject = manifest.Subject
+	index.Annotations = manifest.Annotations
+}
+
+// Marshal serializes a SOCI index into a JSON blob.
+// The JSON blob will be either an OCI 1.1 Artifact or
+// an OCI 1.0 Manifest, depending on how the index was created.
+func (i *Index) Marshal() ([]byte, error) {
+	if i.MediaType == OCIArtifactManifestMediaType {
+		return json.Marshal(i)
+	}
+	var manifest ocispec.Manifest
+	manifest.SchemaVersion = 2
+	manifest.MediaType = ocispec.MediaTypeImageManifest
+	manifest.Config = defaultConfigDescriptor
+	manifest.Layers = i.Blobs
+	manifest.Subject = i.Subject
+	manifest.Annotations = i.Annotations
+	return json.Marshal(manifest)
 }
 
 func GetIndexDescriptorCollection(ctx context.Context, cs content.Store, img images.Image, ps []ocispec.Platform) ([]IndexDescriptorInfo, error) {
@@ -130,10 +185,11 @@ func GetIndexDescriptorCollection(ctx context.Context, cs content.Store, img ima
 }
 
 type buildConfig struct {
-	spanSize            int64
-	minLayerSize        int64
-	buildToolIdentifier string
-	platform            ocispec.Platform
+	spanSize              int64
+	minLayerSize          int64
+	buildToolIdentifier   string
+	platform              ocispec.Platform
+	supportLegacyRegistry bool
 }
 
 type BuildOption func(c *buildConfig) error
@@ -164,6 +220,16 @@ func WithPlatform(platform ocispec.Platform) BuildOption {
 		c.platform = platform
 		return nil
 	}
+}
+
+// WithLegacyRegistrySupport sets whether the SOCI Index should be built for legacy registries.
+// OCI 1.1 added support for associating artifacts such as SOCI indices with images. There is a
+// mechanism to emulate this behavior with OCI 1.0 registries by pretending that the SOCI index
+// is itself an image. This option should only be use if the SOCI index will be pushed to a
+// registry which does not support OCI 1.1 features.
+func WithLegacyRegistrySupport(c *buildConfig) error {
+	c.supportLegacyRegistry = true
+	return nil
 }
 
 type IndexBuilder struct {
@@ -241,7 +307,7 @@ func (b *IndexBuilder) Build(ctx context.Context, img images.Image) (*IndexWithM
 		Size:        imgManifestDesc.Size,
 		Annotations: imgManifestDesc.Annotations,
 	}
-	index := NewIndex(ztocsDesc, refers, annotations)
+	index := NewIndex(ztocsDesc, refers, annotations, b.config.supportLegacyRegistry)
 	return &IndexWithMetadata{
 		Index:       index,
 		Platform:    &b.config.platform,
@@ -251,13 +317,17 @@ func (b *IndexBuilder) Build(ctx context.Context, img images.Image) (*IndexWithM
 }
 
 // Returns a new index.
-func NewIndex(blobs []ocispec.Descriptor, subject *ocispec.Descriptor, annotations map[string]string) *Index {
+func NewIndex(blobs []ocispec.Descriptor, subject *ocispec.Descriptor, annotations map[string]string, legacy bool) *Index {
+	mediaType := OCIArtifactManifestMediaType
+	if legacy {
+		mediaType = ocispec.MediaTypeImageManifest
+	}
 	return &Index{
 		Blobs:        blobs,
 		ArtifactType: SociIndexArtifactType,
 		Annotations:  annotations,
 		Subject:      subject,
-		MediaType:    OCIArtifactManifestMediaType,
+		MediaType:    mediaType,
 	}
 }
 
@@ -386,9 +456,19 @@ func GetImageManifestDescriptor(ctx context.Context, cs content.Store, imageTarg
 
 // WriteSociIndex writes the SociIndex manifest
 func WriteSociIndex(ctx context.Context, indexWithMetadata *IndexWithMetadata, store orascontent.Storage) error {
-	manifest, err := json.Marshal(indexWithMetadata.Index)
+	manifest, err := indexWithMetadata.Index.Marshal()
 	if err != nil {
 		return err
+	}
+
+	// If we're serializing the SOCI index as an OCI 1.0 Manifest, create an
+	// empty config objct in the store as well. We will need to push this to the
+	// registry later.
+	if indexWithMetadata.Index.MediaType == ocispec.MediaTypeArtifactManifest {
+		err = store.Push(ctx, defaultConfigDescriptor, bytes.NewReader(defaultConfigContent))
+		if err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+			return fmt.Errorf("error creating OCI 1.0 empty config: %w", err)
+		}
 	}
 
 	dgst := digest.FromBytes(manifest)

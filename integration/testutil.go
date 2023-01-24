@@ -68,6 +68,8 @@ const (
 	dockerLibrary                = "public.ecr.aws/docker/library/"
 	blobStorePath                = "/var/lib/soci-snapshotter-grpc/content/blobs/sha256"
 	containerdBlobStorePath      = "/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256"
+	OCI11RegistryImage           = "ghcr.io/oci-playground/registry:v3.0.0-alpha.1"
+	OCI10RegistryImage           = "docker.io/library/registry:2"
 )
 
 const (
@@ -272,13 +274,27 @@ func (c registryConfig) mirror(imageName string, opts ...imageOpt) imageInfo {
 }
 
 type registryOptions struct {
-	network string
+	network          string
+	registryImageRef string
+}
+
+func defaultRegistryOptions() registryOptions {
+	return registryOptions{
+		network:          "",
+		registryImageRef: OCI11RegistryImage,
+	}
 }
 
 type registryOpt func(o *registryOptions)
 
+func WithRegistryImageRef(ref string) registryOpt {
+	return func(o *registryOptions) {
+		o.registryImageRef = ref
+	}
+}
+
 func newShellWithRegistry(t *testing.T, r registryConfig, opts ...registryOpt) (sh *shell.Shell, done func() error) {
-	var rOpts registryOptions
+	rOpts := defaultRegistryOptions()
 	for _, o := range opts {
 		o(&rOpts)
 	}
@@ -356,7 +372,7 @@ services:
     volumes:
     - /dev/fuse:/dev/fuse
   registry:
-    image: ghcr.io/oci-playground/registry:v3.0.0-alpha.1
+    image: {{.RegistryImage}}
     container_name: {{.RegistryHost}}
     environment:
     - REGISTRY_AUTH=htpasswd
@@ -372,6 +388,7 @@ services:
 		ServiceName     string
 		ImageContextDir string
 		TargetStage     string
+		RegistryImage   string
 		RegistryHost    string
 		AuthDir         string
 		NetworkConfig   string
@@ -379,6 +396,7 @@ services:
 		ServiceName:     serviceName,
 		ImageContextDir: pRoot,
 		TargetStage:     targetStage,
+		RegistryImage:   rOpts.registryImageRef,
 		RegistryHost:    r.host,
 		AuthDir:         authDir,
 		NetworkConfig:   networkConfig,

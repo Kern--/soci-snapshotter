@@ -45,6 +45,7 @@ var CreateCommand = cli.Command{
 	ArgsUsage: "[flags] <image_ref>",
 	Flags: append(
 		internal.PlatformFlags,
+		internal.LegacyRegistryFlag,
 		cli.Int64Flag{
 			Name:  spanSizeFlag,
 			Usage: "Span size of index. Default is 4 MiB",
@@ -60,6 +61,11 @@ var CreateCommand = cli.Command{
 		srcRef := cliContext.Args().Get(0)
 		if srcRef == "" {
 			return errors.New("source image needs to be specified")
+		}
+
+		var builderOpts []soci.BuildOption
+		if cliContext.Bool(internal.LegacyRegistryFlagName) {
+			builderOpts = append(builderOpts, soci.WithLegacyRegistrySupport)
 		}
 
 		client, ctx, cancel, err := commands.NewClient(cliContext)
@@ -98,10 +104,11 @@ var CreateCommand = cli.Command{
 
 		for _, plat := range ps {
 			builder, err := soci.NewIndexBuilder(cs, blobStore,
-				soci.WithMinLayerSize(minLayerSize),
-				soci.WithSpanSize(spanSize),
-				soci.WithBuildToolIdentifier(buildToolIdentifier),
-				soci.WithPlatform(plat))
+				append(builderOpts,
+					soci.WithMinLayerSize(minLayerSize),
+					soci.WithSpanSize(spanSize),
+					soci.WithBuildToolIdentifier(buildToolIdentifier),
+					soci.WithPlatform(plat))...)
 
 			if err != nil {
 				return err
