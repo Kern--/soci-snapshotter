@@ -3,7 +3,7 @@ module github.com/awslabs/soci-snapshotter
 go 1.17
 
 require (
-	github.com/containerd/containerd v1.6.15
+	github.com/containerd/containerd v1.6.19
 	github.com/containerd/continuity v0.3.0
 	github.com/docker/cli v20.10.22+incompatible
 	github.com/docker/go-metrics v0.0.1
@@ -36,7 +36,7 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.0 // indirect
-	github.com/Microsoft/hcsshim v0.9.6 // indirect
+	github.com/Microsoft/hcsshim v0.9.7 // indirect
 	github.com/PuerkitoBio/purell v1.1.1 // indirect
 	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -75,7 +75,7 @@ require (
 	github.com/opencontainers/runc v1.1.4 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417 // indirect
 	github.com/opencontainers/selinux v1.10.2 // indirect
-	github.com/pelletier/go-toml v1.9.4 // indirect
+	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.37.0 // indirect
