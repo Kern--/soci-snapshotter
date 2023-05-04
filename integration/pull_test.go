@@ -690,7 +690,7 @@ insecure = true
 	//       We use this behaviour for testing mirroring & refleshing functionality.
 	rebootContainerd(t, sh, "", "")
 	sh.X("nerdctl", "pull", "-q", regConfig.mirror(imageName).ref)
-	sh.X("soci", "create", regConfig.mirror(imageName).ref)
+	sh.X("soci", "create", "--min-layer-size=0", regConfig.mirror(imageName).ref)
 	sh.X("soci", "image", "rpull", "--user", regConfig.creds(), "--soci-index-digest", indexDigest, regConfig.mirror(imageName).ref)
 	registryHostIP, registryAltHostIP := getIP(t, sh, regConfig.host), getIP(t, sh, regAltConfig.host)
 	export := func(image string) []string {
