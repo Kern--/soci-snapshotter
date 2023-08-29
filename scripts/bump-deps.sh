@@ -24,6 +24,7 @@ pushd ${SOCI_SNAPSHOTTER_PROJECT_ROOT}
 # skip k8s deps since they use the latest go version/features that may not be in the go version soci uses
 # Also ignored in /dependabot.yml
 go get -u $(go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all | \
+    grep -v "google.golang.org/grpc" | \
     grep -v "^k8s.io/")
 make vendor
 
@@ -32,6 +33,7 @@ pushd ./cmd
 # Also ignored in /dependabot.yml
 go get -u $(go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all | \
     grep -v "^github.com/awslabs/soci-snapshotter" | \
+    grep -v "google.golang.org/grpc" | \
     grep -v "^k8s.io/")
 popd
 make vendor
