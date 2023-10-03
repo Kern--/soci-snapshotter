@@ -27,6 +27,8 @@ COPY ./integ_entrypoint.sh /integ_entrypoint.sh
 COPY . $GOPATH/src/github.com/awslabs/soci-snapshotter
 ENV GOPROXY direct
 RUN apt-get update -y && apt-get install -y libbtrfs-dev libseccomp-dev libz-dev gcc fuse pigz
+RUN if [ "$TARGETARCH" = "aarch64" ] ; then apt-get install -y glibc-static ; fi
+
 RUN cp $GOPATH/src/github.com/awslabs/soci-snapshotter/out/soci /usr/local/bin/ && \
     cp $GOPATH/src/github.com/awslabs/soci-snapshotter/out/soci-snapshotter-grpc /usr/local/bin/ && \
     mkdir /etc/soci-snapshotter-grpc && \
