@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -654,6 +655,7 @@ func TestMirror(t *testing.T) {
 		RegistryHost:        regConfig.host,
 		RegistryAltHost:     regAltConfig.host,
 		AuthDir:             authDir,
+		PlatformName:        "linux/" + runtime.GOARCH,
 	})
 	if err != nil {
 		t.Fatal(err)

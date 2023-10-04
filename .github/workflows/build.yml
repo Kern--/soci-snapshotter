@@ -17,28 +17,78 @@ on:
       - 'Dockerfile'
       - 'integration/**'
       - 'scripts/**'
+env:
+  GO_VERSION: '1.20.6'
 
 jobs:
-  test:
+  containerd-version:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.20.6'
-      - run: make
-      - run: make test
-  integration:
+      - run: |
+         which containerd
+         containerd --version
+         systemctl status containerd
+  integration-arm64:
     runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
-        containerd: ["1.6.19", "1.7.0"]
-    env:
-      DOCKER_BUILD_ARGS: "CONTAINERD_VERSION=${{ matrix.containerd }}"
+        containerd: ["1.7.0"]
+        arch: ["arm64"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
+      - run: |
+          containerd --version
+          wget https://github.com/containerd/containerd/releases/download/v1.7.6/containerd-1.7.6-linux-amd64.tar.gz
+          tar xzf containerd-1.7.6-linux-amd64.tar.gz
+          sudo systemctl stop containerd
+          sudo cp bin/containerd /usr/bin/containerd
+          sudo systemctl start containerd
+          sudo containerd --version
+
+      - uses: uraimo/run-on-arch-action@v2.5.1
+        id: integration-tests-arm64
         with:
-          go-version: '1.20.6'
-      - run: make integration
+          arch: aarch64
+          distro: ubuntu20.04
+          env: |
+            DOCKER_BUILD_ARGS: "CONTAINERD_VERSION=${{ matrix.containerd }}"
+          dockerRunArgs: |
+            -v /tmp:/tmp
+            -v ${{ github.workspace }}:/soci-snapshotter
+          shell: /bin/bash
+          install: |
+            apt-get update
+            apt-get -y install curl gcc git make libz-dev wget
+
+            wget -nv https://go.dev/dl/go${{ env.GO_VERSION }}.linux-arm64.tar.gz
+            rm -rf /usr/local/go && tar -C /usr/local -xzf go${{ env.GO_VERSION }}.linux-arm64.tar.gz
+
+            curl -fsSL https://get.docker.com -o get-docker.sh
+
+            # Force arm64 arch package installation
+            sed -i 's/arch=$(dpkg --print-architecture)/arch=arm64/g' get-docker.sh
+            sed -i 's/containerd.io/containerd.io:arm64/g' get-docker.sh
+            sed -i 's/pkg_version%=}/pkg_version%=}:arm64/g' get-docker.sh
+            sed -i 's/docker-compose-plugin/docker-compose-plugin:arm64/g' get-docker.sh
+            sed -i 's/docker-ce-rootless-extras$pkg_version/docker-ce-rootless-extras$pkg_version:arm64/g' get-docker.sh
+            sed -i 's/docker-buildx-plugin/docker-buildx-plugin:arm64/g' get-docker.sh
+
+            sh ./get-docker.sh
+          
+            wget https://github.com/containerd/containerd/releases/download/v1.7.6/containerd-1.7.6-linux-amd64.tar.gz
+            tar -C /usr/local/bin -xzf containerd-1.7.6-linux-amd64.tar.gz
+          
+            curl -SL https://github.com/docker/compose/releases/download/v2.19.0/docker-compose-linux-aarch64 -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+          run: |
+            echo ${{ github.workspace }}
+            dpkg --add-architecture arm64
+            export PATH=$PATH:/usr/local/go/bin
+            
+            uname -m
+            docker info
+            docker-compose --version
+            containerd --version
+            cd /soci-snapshotter
+            STATIC=1 GOFLAGS="-buildvcs=false" make integration

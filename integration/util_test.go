@@ -45,6 +45,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -135,6 +136,7 @@ version: "3.7"
 services:
   testing:
    image: soci_base:soci_test
+   platform: {{.PlatformName}}
    privileged: true
    init: true
    entrypoint: [ "/integ_entrypoint.sh" ]
@@ -152,6 +154,7 @@ version: "3.7"
 services:
  {{.ServiceName}}:
   image: soci_base:soci_test
+  platform: {{.PlatformName}}
   privileged: true
   init: true
   entrypoint: [ "/integ_entrypoint.sh" ]
@@ -165,6 +168,7 @@ services:
    - /dev/fuse:/dev/fuse
  registry:
   image: {{.RegistryImageRef}}
+  platform: {{.PlatformName}}
   container_name: {{.RegistryHost}}
   environment:
    - REGISTRY_AUTH=htpasswd
@@ -183,6 +187,7 @@ version: "3.7"
 services:
   {{.ServiceName}}:
     image: soci_base:soci_test
+	platform: {{.PlatformName}}
     privileged: true
     init: true
     entrypoint: [ "/integ_entrypoint.sh" ]
@@ -196,6 +201,7 @@ services:
     - /dev/fuse:/dev/fuse
   registry:
     image: {{.RegistryImageRef}}
+	platform: {{.PlatformName}}
     container_name: {{.RegistryHost}}
     environment:
     - REGISTRY_AUTH=htpasswd
@@ -209,6 +215,7 @@ services:
     - {{.AuthDir}}:/auth:ro
   registry-alt:
     image: {{.RegistryAltImageRef}}
+	platform: {{.PlatformName}}
     container_name: {{.RegistryAltHost}}
 `
 
@@ -217,6 +224,7 @@ version: "3.7"
 services:
  {{.ServiceName}}:
   image: soci_base:soci_test
+  platform: {{.PlatformName}}
   build:
    context: {{.ImageContextDir}}
    target: {{.TargetStage}}
@@ -224,6 +232,7 @@ services:
     - SNAPSHOTTER_BUILD_FLAGS="-race"
  registry:
   image: registry2:soci_test
+  platform: {{.PlatformName}}
   build:
    context: {{.ImageContextDir}}
    target: {{.Registry2Stage}}
@@ -240,6 +249,7 @@ type dockerComposeYaml struct {
 	RegistryAltHost     string
 	AuthDir             string
 	NetworkConfig       string
+	PlatformName        string
 }
 
 // getContainerdConfigToml creates a containerd config yaml, by appending all
@@ -489,6 +499,7 @@ networks:
 		RegistryImageRef: rOpts.registryImageRef,
 		AuthDir:          authDir,
 		NetworkConfig:    networkConfig,
+		PlatformName:     "linux/" + runtime.GOARCH,
 	})
 	if err != nil {
 		t.Fatal(err)
