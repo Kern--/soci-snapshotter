@@ -34,6 +34,7 @@ package integration
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	shell "github.com/awslabs/soci-snapshotter/util/dockershell"
@@ -125,6 +126,7 @@ func setup() ([]func() error, error) {
 		ImageContextDir: pRoot,
 		TargetStage:     targetStage,
 		Registry2Stage:  registry2Stage,
+		PlatformName:    "linux/" + runtime.GOARCH,
 	})
 	if err != nil {
 		return nil, err
