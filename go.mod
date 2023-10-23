@@ -16,7 +16,7 @@ require (
 	github.com/google/uuid v1.3.1
 	github.com/hanwen/go-fuse/v2 v2.4.1-0.20231001162222-fc2c4d3da0a0
 	github.com/hashicorp/go-retryablehttp v0.7.4
-	github.com/klauspost/compress v1.17.0
+	github.com/klauspost/compress v1.17.2
 	github.com/moby/sys/mountinfo v0.6.2
 	github.com/montanaflynn/stats v0.7.1
 	github.com/opencontainers/go-digest v1.0.0
