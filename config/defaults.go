@@ -50,7 +50,7 @@ const (
 
 // FSConfig defaults
 const (
-	defaultFuseTimeoutSec = 1
+	defaultFuseTimeoutSec = 1000
 
 	// defaultBgSilencePeriodMsec specifies the amount of time the background fetcher will wait once a new layer comes in
 	// before (re)starting fetches.

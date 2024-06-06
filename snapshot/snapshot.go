@@ -34,6 +34,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -46,6 +47,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/pkg/idtools"
 	ctdsnapshotters "github.com/containerd/containerd/pkg/snapshotters"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
@@ -99,6 +101,7 @@ type FileSystem interface {
 	Check(ctx context.Context, mountpoint string, labels map[string]string) error
 	Unmount(ctx context.Context, mountpoint string) error
 	MountLocal(ctx context.Context, mountpoint string, labels map[string]string, mounts []mount.Mount) error
+	IdMapMount(ctx context.Context, mountpoint string, idmap idtools.IdentityMapping) (string, error)
 }
 
 // SnapshotterConfig is used to configure the remote snapshotter instance
@@ -107,6 +110,7 @@ type SnapshotterConfig struct {
 	// minLayerSize skips remote mounting of smaller layers
 	minLayerSize                int64
 	allowInvalidMountsOnRestart bool
+	allowIdMap                  bool
 }
 
 // Opt is an option to configure the remote snapshotter
@@ -134,6 +138,11 @@ func AllowInvalidMountsOnRestart(config *SnapshotterConfig) error {
 	return nil
 }
 
+func AllowIdMap(config *SnapshotterConfig) error {
+	config.allowIdMap = true
+	return nil
+}
+
 type snapshotter struct {
 	root        string
 	ms          *storage.MetaStore
@@ -144,6 +153,8 @@ type snapshotter struct {
 	userxattr                   bool  // whether to enable "userxattr" mount option
 	minLayerSize                int64 // minimum layer size for remote mounting
 	allowInvalidMountsOnRestart bool
+	allowIdMap                  bool
+	idmapped                    map[string]interface{}
 }
 
 // NewSnapshotter returns a Snapshotter which can use unpacked remote layers
@@ -194,6 +205,8 @@ func NewSnapshotter(ctx context.Context, root string, targetFs FileSystem, opts 
 		userxattr:                   userxattr,
 		minLayerSize:                config.minLayerSize,
 		allowInvalidMountsOnRestart: config.allowInvalidMountsOnRestart,
+		allowIdMap:                  config.allowIdMap,
+		idmapped:                    make(map[string]interface{}),
 	}
 
 	if err := o.restoreRemoteSnapshot(ctx); err != nil {
@@ -295,9 +308,10 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		}
 	}
 
+	log.G(ctx).Infof("preparing: %v", base)
 	target, ok := base.Labels[targetSnapshotLabel]
 	if !ok {
-		return o.mounts(ctx, s, parent)
+		return o.mounts(ctx, s, parent, base.Labels)
 	}
 
 	// NOTE: If passed labels include a target of the remote snapshot, `Prepare`
@@ -330,7 +344,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 	}
 
 	// fall back to local snapshot
-	mounts, err := o.mounts(ctx, s, parent)
+	mounts, err := o.mounts(ctx, s, parent, base.Labels)
 	if err != nil {
 		// don't fallback here, since there was an error getting mounts
 		return nil, err
@@ -379,7 +393,7 @@ func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 	if err != nil {
 		return nil, err
 	}
-	return o.mounts(ctx, s, parent)
+	return o.mounts(ctx, s, parent, make(map[string]string))
 }
 
 // Mounts returns the mounts for the transaction identified by key. Can be
@@ -397,7 +411,7 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to get active mount: %w", err)
 	}
-	return o.mounts(ctx, s, key)
+	return o.mounts(ctx, s, key, make(map[string]string))
 }
 
 func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
@@ -689,7 +703,8 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 	return td, nil
 }
 
-func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot, checkKey string) ([]mount.Mount, error) {
+func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot, checkKey string, labels map[string]string) ([]mount.Mount, error) {
+	log.G(ctx).WithField("key", checkKey).Infof("labels: %v", labels)
 	// Make sure that all layers lower than the target layer are available
 	if checkKey != "" && !o.checkAvailability(ctx, checkKey) {
 		return nil, fmt.Errorf("layer %q unavailable: %w", s.ID, errdefs.ErrUnavailable)
@@ -734,15 +749,39 @@ func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot, checkKey s
 		}, nil
 	}
 
+	var idmap idtools.IdentityMapping
+	if idmapJson, ok := labels[snapshots.LabelSnapshotUserNSMapping]; ok {
+		o.idmapped[s.ID] = struct{}{}
+		err := json.Unmarshal([]byte(idmapJson), &idmap)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	parentPaths := make([]string, len(s.ParentIDs))
 	for i := range s.ParentIDs {
-		parentPaths[i] = o.upperPath(s.ParentIDs[i])
+		path := o.upperPath(s.ParentIDs[i])
+		if !idmap.Empty() {
+			log.G(ctx).Infof("mapping ids")
+			var err error
+			path, err = o.fs.IdMapMount(ctx, path, idmap)
+			if err != nil {
+				return nil, err
+			}
+		} else if _, ok := o.idmapped[s.ID]; ok {
+			log.G(ctx).Info("reloading idmap")
+			path = path + "_mapped"
+		}
+		parentPaths[i] = path
 	}
 
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(parentPaths, ":")))
 	if o.userxattr {
 		options = append(options, "userxattr")
 	}
+
+	options = append(options, "metacopy=on")
+
 	return []mount.Mount{
 		{
 			Type:    "overlay",

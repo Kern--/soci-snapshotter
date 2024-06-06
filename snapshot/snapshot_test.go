@@ -43,6 +43,7 @@ import (
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/pkg/idtools"
 	"github.com/containerd/containerd/pkg/testutil"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/storage"
@@ -417,6 +418,10 @@ func (fs *bindFs) MountLocal(ctx context.Context, mountpoint string, labels map[
 	return nil
 }
 
+func (fs *bindFs) IdMapMount(ctx context.Context, mountpoint string, idmap idtools.IdentityMapping) (string, error) {
+	return mountpoint, nil
+}
+
 func dummyFileSystem() FileSystem { return &dummyFs{} }
 
 type dummyFs struct{}
@@ -435,6 +440,10 @@ func (fs *dummyFs) Unmount(ctx context.Context, mountpoint string) error {
 
 func (fs *dummyFs) MountLocal(ctx context.Context, mountpoint string, labels map[string]string, mounts []mount.Mount) error {
 	return fmt.Errorf("dummy")
+}
+
+func (fs *dummyFs) IdMapMount(ctx context.Context, mountpoint string, idmap idtools.IdentityMapping) (string, error) {
+	return "", fmt.Errorf("dummy")
 }
 
 // =============================================================================

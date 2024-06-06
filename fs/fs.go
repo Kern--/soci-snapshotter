@@ -47,6 +47,7 @@ import (
 	"fmt"
 	golog "log"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -64,6 +65,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/soci"
 	"github.com/awslabs/soci-snapshotter/soci/store"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/pkg/idtools"
 	ctdsnapshotters "github.com/containerd/containerd/pkg/snapshotters"
 	"github.com/containerd/containerd/reference"
 	"github.com/containerd/containerd/remotes/docker"
@@ -455,6 +457,46 @@ func (fs *filesystem) getSociContext(ctx context.Context, imageRef, indexDigest,
 	return c, err
 }
 
+func (fs *filesystem) IdMapMount(ctx context.Context, mountpoint string, idmapper idtools.IdentityMapping) (string, error) {
+	newMountpoint := mountpoint + "_mapped"
+	os.Mkdir(newMountpoint, 0755)
+	fs.layerMu.Lock()
+	l := fs.layer[mountpoint]
+	fs.layerMu.Unlock()
+	node, err := l.RootNode(0, idmapper)
+	if err != nil {
+		return "", err
+	}
+
+	rawFS := fusefs.NewNodeFS(node, &fusefs.Options{
+		AttrTimeout:     &fs.attrTimeout,
+		EntryTimeout:    &fs.entryTimeout,
+		NegativeTimeout: &fs.negativeTimeout,
+		NullPermissions: true,
+	})
+	mountOpts := &fuse.MountOptions{
+		AllowOther:    true,   // allow users other than root&mounter to access fs
+		FsName:        "soci", // name this filesystem as "soci"
+		Debug:         fs.debug,
+		DisableXAttrs: l.DisableXAttrs(),
+		Options:       []string{"default_permissions", "ro"},
+	}
+	if _, err := exec.LookPath(fusermountBin); err == nil {
+		mountOpts.Options = []string{"suid"} // option for fusermount; allow setuid inside container
+	} else {
+		log.G(ctx).WithError(err).Infof("%s not installed; trying direct mount", fusermountBin)
+		mountOpts.DirectMount = true
+	}
+	server, err := fuse.NewServer(rawFS, newMountpoint, mountOpts)
+	if err != nil {
+		log.G(ctx).WithError(err).Debug("failed to make filesystem server")
+		return "", err
+	}
+
+	go server.Serve()
+	return newMountpoint, server.WaitMount()
+}
+
 func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[string]string) (retErr error) {
 	// Setting the start time to measure the Mount operation duration.
 	start := time.Now()
@@ -566,7 +608,7 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 	// Maybe we should reword the log here or remove it entirely,
 	// since the old Verify() function no longer serves any purpose.
 
-	node, err := l.RootNode(0)
+	node, err := l.RootNode(0, idtools.IdentityMapping{})
 	if err != nil {
 		log.G(ctx).WithError(err).Warnf("Failed to get root node")
 		retErr = fmt.Errorf("failed to get root node: %w", err)
@@ -602,6 +644,7 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 		Debug:         fs.debug,
 		Logger:        golog.New(logger, "", 0),
 		DisableXAttrs: l.DisableXAttrs(),
+		Options:       []string{"default_permissions", "ro"},
 	}
 	if _, err := exec.LookPath(fusermountBin); err == nil {
 		mountOpts.Options = []string{"suid"} // option for fusermount; allow setuid inside container

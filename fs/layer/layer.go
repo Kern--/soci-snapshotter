@@ -63,6 +63,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/util/lrucache"
 	"github.com/awslabs/soci-snapshotter/util/namedmutex"
 	"github.com/awslabs/soci-snapshotter/ztoc"
+	"github.com/containerd/containerd/pkg/idtools"
 	"github.com/containerd/containerd/reference"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/log"
@@ -86,7 +87,7 @@ type Layer interface {
 	Info() Info
 
 	// RootNode returns the root node of this layer.
-	RootNode(baseInode uint32) (fusefs.InodeEmbedder, error)
+	RootNode(baseInode uint32, idMapper idtools.IdentityMapping) (fusefs.InodeEmbedder, error)
 
 	// Check checks if the layer is still connectable.
 	Check() error
@@ -489,14 +490,14 @@ func (l *layerRef) Done() {
 	l.done()
 }
 
-func (l *layer) RootNode(baseInode uint32) (fusefs.InodeEmbedder, error) {
+func (l *layer) RootNode(baseInode uint32, idMapper idtools.IdentityMapping) (fusefs.InodeEmbedder, error) {
 	if l.isClosed() {
 		return nil, fmt.Errorf("layer is already closed")
 	}
 	if l.r == nil {
 		return nil, fmt.Errorf("layer hasn't been verified yet")
 	}
-	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType, l.resolver.config.LogFuseOperations, l.fuseOperationCounter)
+	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType, l.resolver.config.LogFuseOperations, l.fuseOperationCounter, idMapper)
 }
 
 func (l *layer) ReadAt(p []byte, offset int64, opts ...remote.Option) (int, error) {
