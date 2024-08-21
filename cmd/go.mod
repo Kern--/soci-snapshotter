@@ -1,6 +1,7 @@
 module github.com/awslabs/soci-snapshotter/cmd
 
 go 1.21
+toolchain go1.22.5
 
 require (
 	github.com/awslabs/soci-snapshotter v0.0.0-local
@@ -13,7 +14,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli v1.22.15
-	go.etcd.io/bbolt v1.3.10
+	go.etcd.io/bbolt v1.3.11
 	golang.org/x/sys v0.21.0
 	google.golang.org/grpc v1.59.0
 	k8s.io/cri-api v0.28.2
