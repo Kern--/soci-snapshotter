@@ -37,6 +37,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/awslabs/soci-snapshotter/fs/layout"
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 )
@@ -96,10 +97,12 @@ type File interface {
 	TarName() string
 	TarHeaderOffset() compression.Offset
 	TarHeaderSize() compression.Offset
+	Fd() int
 }
 
 type Options struct {
 	Telemetry *Telemetry
+	Layouter  *layout.Layouter
 }
 
 // Option is an option to configure the behaviour of reader.
@@ -109,6 +112,13 @@ type Option func(o *Options) error
 func WithTelemetry(telemetry *Telemetry) Option {
 	return func(o *Options) error {
 		o.Telemetry = telemetry
+		return nil
+	}
+}
+
+func WithLayouter(l *layout.Layouter) Option {
+	return func(o *Options) error {
+		o.Layouter = l
 		return nil
 	}
 }

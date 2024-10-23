@@ -25,6 +25,7 @@ import (
 	"runtime"
 
 	"github.com/awslabs/soci-snapshotter/cache"
+	"github.com/awslabs/soci-snapshotter/fs/layout"
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 	"github.com/containerd/log"
@@ -67,6 +68,7 @@ func (src *SectionReaderCloser) Close() error {
 type SpanManager struct {
 	cache                             cache.BlobCache
 	cacheOpt                          []cache.Option
+	layouter                          *layout.Layouter
 	zinfo                             compression.Zinfo
 	r                                 *io.SectionReader // reader for contents of the spans managed by SpanManager
 	spans                             []*span
@@ -91,7 +93,7 @@ type spanInfo struct {
 // spans based on the ztoc.
 
 // TODO: return errors/nil objects on failure
-func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, cacheOpt ...cache.Option) *SpanManager {
+func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, layouter *layout.Layouter, cacheOpt ...cache.Option) *SpanManager {
 	index, err := ztoc.Zinfo()
 	if err != nil {
 		return nil
@@ -113,6 +115,7 @@ func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries in
 		cache:                             cache,
 		cacheOpt:                          cacheOpt,
 		zinfo:                             index,
+		layouter:                          layouter,
 		r:                                 r,
 		spans:                             spans,
 		ztoc:                              ztoc,
@@ -298,6 +301,7 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 		if err := m.addSpanToCache(s.id, uncompSpanBuf, m.cacheOpt...); err != nil {
 			return nil, err
 		}
+
 		if err := s.setState(uncompressed); err != nil {
 			return nil, err
 		}
@@ -409,6 +413,13 @@ func (m *SpanManager) uncompressSpan(s *span, compressedBuf []byte) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
+
+	if m.layouter != nil {
+		if err := m.layouter.Write(s.startUncompOffset, bytes); err != nil {
+			return nil, err
+		}
+	}
+
 	return bytes, nil
 }
 

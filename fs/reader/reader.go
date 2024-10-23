@@ -64,6 +64,11 @@ type Reader interface {
 	LastOnDemandReadTime() time.Time
 }
 
+type Fder interface {
+	Name() string
+	Fd() int
+}
+
 // VerifiableReader produces a Reader with a given verifier.
 type VerifiableReader struct {
 	r *reader
@@ -251,6 +256,14 @@ func (sf *file) ReadAt(p []byte, offset int64) (int, error) {
 	commonmetrics.AddBytesCount(commonmetrics.SynchronousBytesServed, sf.gr.layerSha, int64(n)) // measure the number of bytes served synchronously
 
 	return n, nil
+}
+
+func (sf *file) Fd() int {
+	return sf.fr.Fd()
+}
+
+func (sf *file) Name() string {
+	return sf.fr.TarName()
 }
 
 // Verify verifies that the file's attributes match the tar header in the image layer

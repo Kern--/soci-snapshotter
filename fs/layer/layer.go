@@ -53,6 +53,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/config"
 
 	backgroundfetcher "github.com/awslabs/soci-snapshotter/fs/backgroundfetcher"
+	"github.com/awslabs/soci-snapshotter/fs/layout"
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
 	"github.com/awslabs/soci-snapshotter/fs/reader"
 	"github.com/awslabs/soci-snapshotter/fs/remote"
@@ -328,14 +329,20 @@ func (r *Resolver) Resolve(ctx context.Context, hosts []docker.RegistryHost, ref
 			commonmetrics.MeasureLatencyInMilliseconds(commonmetrics.InitMetadataStore, desc.Digest, start)
 		},
 	}
-	meta, err := r.metadataStore(sr, ztoc.TOC, append(metadataOpts, metadata.WithTelemetry(&telemetry))...)
+	layouter, err := layout.New(filepath.Join(config.SociSnapshotterRootPath, "snapshotter", "layout", desc.Digest.Encoded()), ztoc.TOC)
 	if err != nil {
 		return nil, err
 	}
+
+	meta, err := r.metadataStore(sr, ztoc.TOC, append(metadataOpts, metadata.WithTelemetry(&telemetry), metadata.WithLayouter(layouter))...)
+	if err != nil {
+		return nil, err
+	}
+
 	ztoc.TOC.FileMetadata = nil
 	log.G(ctx).Debugf("[Resolver.Resolve]Initialized metadata store for layer sha=%v", desc.Digest)
 
-	spanManager := spanmanager.New(ztoc, sr, spanCache, r.config.BlobConfig.MaxSpanVerificationRetries, cache.Direct())
+	spanManager := spanmanager.New(ztoc, sr, spanCache, r.config.BlobConfig.MaxSpanVerificationRetries, layouter, cache.Direct())
 	var bgLayerResolver backgroundfetcher.Resolver
 	if r.bgFetcher != nil {
 		bgLayerResolver = backgroundfetcher.NewSequentialResolver(desc.Digest, spanManager)
@@ -355,8 +362,13 @@ func (r *Resolver) Resolve(ctx context.Context, hosts []docker.RegistryHost, ref
 		l.close() // layer already exists in the cache. discard this.
 	}
 
+	done3 := func() {
+		done2()
+		//os.RemoveAll(filepath.Join(config.SociSnapshotterRootPath, "snapshotter", "layout", desc.Digest.Encoded()))
+	}
+
 	log.G(ctx).Debugf("resolved layer")
-	return &layerRef{cachedL.(*layer), done2}, nil
+	return &layerRef{cachedL.(*layer), done3}, nil
 }
 
 // resolveBlob resolves a blob based on the passed layer blob information.

@@ -226,6 +226,37 @@ type fs struct {
 	opaqueXattrs     []string
 	logFSOperations  bool
 	operationCounter *FuseOperationCounter
+	refCounts        sync.Map
+}
+
+func (fs *fs) incRefCount(id uint32) {
+	for {
+		var count uint32
+		c, ok := fs.refCounts.Load(id)
+		if !ok {
+			fs.refCounts.Store(id, uint32(1))
+			return
+		}
+		count = c.(uint32)
+		if fs.refCounts.CompareAndSwap(id, count, count+1) {
+			return
+		}
+	}
+}
+
+func (fs *fs) decRefCount(id uint32) {
+	for {
+		var count uint32
+		c, ok := fs.refCounts.Load(id)
+		if !ok {
+			fs.refCounts.Store(id, uint32(0))
+			return
+		}
+		count = c.(uint32)
+		if fs.refCounts.CompareAndSwap(id, count, count-1) {
+			return
+		}
+	}
 }
 
 func (fs *fs) inodeOfState() uint64 {
@@ -479,6 +510,8 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fusefs.FileHandle, fu
 		n.fs.reportFailure(fuseOpOpen, fmt.Errorf("%s: %v", fuseOpOpen, err))
 		return nil, 0, syscall.EIO
 	}
+	n.fs.incRefCount(n.id)
+
 	return &file{
 		n:  n,
 		ra: ra,
@@ -574,6 +607,13 @@ var _ = (fusefs.FileReader)((*file)(nil))
 func (f *file) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	f.n.fs.logAndIncrementOpCounter(ctx, fuseOpFileRead, f.n.Path(nil))
 
+	//filename := "unknown"
+	//if mf, ok := f.ra.(reader.Fder); ok {
+	//	filename = mf.Name()
+	//}
+
+	//log.G(ctx).Debugf("regular read for: %s", filename)
+
 	defer commonmetrics.MeasureLatencyInMicroseconds(commonmetrics.SynchronousRead, f.n.fs.layerDigest, time.Now()) // measure time for synchronous file reads (in microseconds)
 	defer commonmetrics.IncOperationCount(commonmetrics.SynchronousReadCount, f.n.fs.layerDigest)                   // increment the counter for synchronous file reads
 	n, err := f.ra.ReadAt(dest, off)
@@ -582,6 +622,33 @@ func (f *file) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResul
 		return nil, syscall.EIO
 	}
 	return fuse.ReadResultData(dest[:n]), 0
+}
+
+var _ = (fusefs.FileReleaser)((*file)(nil))
+
+func (f *file) Release(ctx context.Context) syscall.Errno {
+	f.n.fs.logAndIncrementOpCounter(ctx, "fuse.Release", f.n.Path(nil))
+	f.n.fs.decRefCount(f.n.id)
+	return 0
+}
+
+var _ = (fusefs.FilePassthroughFder)((*file)(nil))
+
+func (f *file) PassthroughFd() (int, bool) {
+	if metaf, ok := f.ra.(reader.Fder); ok {
+		n, found := f.n.fs.refCounts.Load(f.n.id)
+		if found && n.(uint32) > 1 {
+			//log.L.Debugf("file is still open (rc %d), skipping passthrough for %s", n.(uint32), metaf.Name())
+			return 0, false
+		}
+		fd := metaf.Fd()
+		if fd > 0 {
+			//log.L.Debugf("enabling passthrough for %s", metaf.Name())
+			return fd, true
+		}
+		//log.L.Debugf("skipping passthrough for %s", metaf.Name())
+	}
+	return 0, false
 }
 
 var _ = (fusefs.FileGetattrer)((*file)(nil))

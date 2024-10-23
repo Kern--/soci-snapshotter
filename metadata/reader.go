@@ -46,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/awslabs/soci-snapshotter/fs/layout"
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 	"github.com/rs/xid"
@@ -72,6 +73,8 @@ type reader struct {
 	curID   uint32
 	curIDMu sync.Mutex
 	initG   *errgroup.Group
+
+	layouter *layout.Layouter
 }
 
 func (r *reader) nextID() (uint32, error) {
@@ -93,7 +96,7 @@ func NewReader(db *bolt.DB, sr *io.SectionReader, toc ztoc.TOC, opts ...Option) 
 		}
 	}
 
-	r := &reader{sr: sr, db: db, initG: new(errgroup.Group)}
+	r := &reader{sr: sr, db: db, initG: new(errgroup.Group), layouter: rOpts.Layouter}
 	start := time.Now()
 	if rOpts.Telemetry != nil && rOpts.Telemetry.InitMetadataStoreLatency != nil {
 		rOpts.Telemetry.InitMetadataStoreLatency(start)
@@ -632,11 +635,13 @@ func (r *reader) OpenFile(id uint32) (File, error) {
 	}); err != nil {
 		return nil, err
 	}
-	return &file{mde.TarName, mde.UncompressedOffset, compression.Offset(size), mde.TarHeaderOffset, mde.TarHeaderSize}, nil
+
+	return &file{mde.TarName, r.layouter, mde.UncompressedOffset, compression.Offset(size), mde.TarHeaderOffset, mde.TarHeaderSize}, nil
 }
 
 type file struct {
 	tarName            string
+	layouter           *layout.Layouter
 	uncompressedOffset compression.Offset
 	uncompressedSize   compression.Offset
 	tarHeaderOffset    compression.Offset
@@ -660,6 +665,16 @@ func (fr *file) TarHeaderOffset() compression.Offset {
 
 func (fr *file) TarHeaderSize() compression.Offset {
 	return fr.tarHeaderSize
+}
+
+func (fr *file) Fd() int {
+	f, err := fr.layouter.Open(fr.tarName)
+	if err != nil && !errors.Is(err, layout.ErrNotComplete) {
+		// todo
+		//fmt.Fprintf(os.Stderr, "err opening layout file: %v\n", err)
+		return 0
+	}
+	return int(f.Fd())
 }
 
 func attrFromZtocEntry(src *ztoc.FileMetadata, dst *Attr) *Attr {

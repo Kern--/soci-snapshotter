@@ -81,6 +81,7 @@ var (
 	defaultIndexSelectionPolicy = SelectFirstPolicy
 	fusermountBin               = "fusermount"
 	preresolverQueueBufferSize  = 1024 // arbitrarily chosen buffer size
+
 )
 
 // Preresolver will resolve a number of layers in parallel,

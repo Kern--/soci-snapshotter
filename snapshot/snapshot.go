@@ -61,8 +61,9 @@ import (
 const (
 	targetSnapshotLabel = "containerd.io/snapshot.ref"
 	remoteLabel         = "containerd.io/snapshot/remote"
-	remoteLabelVal      = "remote snapshot"
+	layoutLabel         = "containerd.io/snapshot/layoutdir"
 
+	remoteLabelVal = "remote snapshot"
 	// remoteSnapshotLogKey is a key for log line, which indicates whether
 	// `Prepare` method successfully prepared targeting remote snapshot or not, as
 	// defined in the following:
@@ -184,6 +185,10 @@ func NewSnapshotter(ctx context.Context, root string, targetFs FileSystem, opts 
 	}
 
 	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
+		return nil, err
+	}
+
+	if err := os.Mkdir(filepath.Join(root, "layout"), 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
 
@@ -320,6 +325,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		err := o.prepareRemoteSnapshot(lCtx, key, base.Labels)
 		if err == nil {
 			base.Labels[remoteLabel] = remoteLabelVal // Mark this snapshot as remote
+			base.Labels[layoutLabel] = filepath.Join("/var/lib/soci-snapshotter-grpc", "snapshotter", "layout", base.Labels[ctdsnapshotters.TargetLayerDigestLabel][7:])
 			err := o.commit(ctx, true, target, key, append(opts, snapshots.WithLabels(base.Labels))...)
 			if err == nil || errdefs.IsAlreadyExists(err) {
 				// count also AlreadyExists as "success"
@@ -479,6 +485,16 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 			}
 		}
 	}()
+
+	_, in, _, err := storage.GetInfo(ctx, key)
+	if err != nil {
+		return err
+	}
+	path := in.Labels[layoutLabel]
+	err = os.RemoveAll(path)
+	if err != nil {
+		return err
+	}
 
 	_, _, err = storage.Remove(ctx, key)
 	if err != nil {
