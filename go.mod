@@ -117,3 +117,5 @@ require (
 
 // Temporary fork for avoiding importing patent-protected code: https://github.com/hashicorp/golang-lru/issues/73
 replace github.com/hashicorp/golang-lru => github.com/ktock/golang-lru v0.5.5-0.20211029085301-ec551be6f75c
+
+replace oras.land/oras-go/v2 => ../oras-go
