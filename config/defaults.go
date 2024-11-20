@@ -74,6 +74,9 @@ const (
 	// defaultFuseMetricsEmitWaitDurationSec is the amount of time the snapshotter will wait before emitting the metrics for FUSE operation.
 	defaultFuseMetricsEmitWaitDurationSec = 60
 
+	// defaultMinConcurrencyLayerSize is the minimum size, in bytes, at which concurrent pull operations will occur
+	defaultMinConcurrencyLayerSize = 4 << 20 // 4 MiB
+
 	// defaultMaxConcurrency is the maximum number of layers allowed to be pulled at once
 	defaultMaxConcurrency = 100
 
@@ -86,7 +89,7 @@ const (
 	// defaultResponseHeaderTimeoutMsec is the default number of milliseconds before timeout while waiting for response header from a remote endpoint. See `TimeoutConfig.ResponseHeaderTimeout`.
 	defaultResponseHeaderTimeoutMsec = 3_000
 	// defaultRequestTimeoutMsec is the default number of milliseconds that the entire request can take before timeout. See `TimeoutConfig.RequestTimeout`.
-	defaultRequestTimeoutMsec = 30_000
+	defaultRequestTimeoutMsec = 1_000_000
 
 	// defaults based on a target total retry time of at least 5s. 30*((2^8)-1)>5000
 

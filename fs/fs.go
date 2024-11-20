@@ -151,11 +151,13 @@ func (pr *preresolver) Enqueue(imgNameAndDigest string, fn func(context.Context)
 type Option func(*options)
 
 type options struct {
-	getSources        source.GetSources
-	resolveHandlers   map[string]remote.Handler
-	metadataStore     metadata.Store
-	overlayOpaqueType layer.OverlayOpaqueType
-	maxConcurrency    int64
+	getSources              source.GetSources
+	resolveHandlers         map[string]remote.Handler
+	metadataStore           metadata.Store
+	overlayOpaqueType       layer.OverlayOpaqueType
+	maxConcurrency          int64
+	maxPullConcurrency      int64
+	minConcurrencyLayerSize int64
 }
 
 func WithGetSources(s source.GetSources) Option {
@@ -188,6 +190,18 @@ func WithOverlayOpaqueType(overlayOpaqueType layer.OverlayOpaqueType) Option {
 func WithMaxConcurrency(maxConcurrency int64) Option {
 	return func(opts *options) {
 		opts.maxConcurrency = maxConcurrency
+	}
+}
+
+func WithMaxPullConcurrency(maxPullConcurrency int64) Option {
+	return func(opts *options) {
+		opts.maxPullConcurrency = maxPullConcurrency
+	}
+}
+
+func WithMinConcurrencyLayerSize(minConcurrencyLayerSize int64) Option {
+	return func(opts *options) {
+		opts.minConcurrencyLayerSize = minConcurrencyLayerSize
 	}
 }
 
@@ -293,6 +307,8 @@ func NewFilesystem(ctx context.Context, root string, cfg config.FSConfig, opts .
 		mountTimeout:                mountTimeout,
 		fuseMetricsEmitWaitDuration: fuseMetricsEmitWaitDuration,
 		pr:                          pr,
+		maxPullConcurrency:          fsOpts.maxPullConcurrency,
+		minConcurrencyLayerSize:     fsOpts.minConcurrencyLayerSize,
 	}, nil
 }
 
@@ -306,7 +322,7 @@ type sociContext struct {
 	fuseOperationCounter *layer.FuseOperationCounter
 }
 
-func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef, indexDigest, imageManifestDigest string, store store.Store, fuseOpEmitWaitDuration time.Duration, client *http.Client) error {
+func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef, indexDigest, imageManifestDigest string, store store.Store, fuseOpEmitWaitDuration time.Duration, client *http.Client, maxPullConcurrency, minConcurrencyLayerSize int64) error {
 	var retErr error
 	c.fetchOnce.Do(func() {
 		defer func() {
@@ -351,7 +367,7 @@ func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef,
 
 		log.G(ctx).WithField("digest", indexDesc.Digest.String()).Infof("fetching SOCI artifacts using index descriptor")
 
-		index, err := FetchSociArtifacts(fsCtx, refspec, indexDesc, store, remoteStore)
+		index, err := FetchSociArtifacts(fsCtx, refspec, indexDesc, store, remoteStore, maxPullConcurrency, minConcurrencyLayerSize)
 		if err != nil {
 			retErr = fmt.Errorf("%w: error trying to fetch SOCI artifacts: %w", snapshot.ErrNoIndex, err)
 			return
@@ -397,6 +413,8 @@ type filesystem struct {
 	mountTimeout                time.Duration
 	fuseMetricsEmitWaitDuration time.Duration
 	pr                          *preresolver
+	maxPullConcurrency          int64
+	minConcurrencyLayerSize     int64
 }
 
 func (fs *filesystem) MountLocal(ctx context.Context, mountpoint string, labels map[string]string, mounts []mount.Mount) error {
@@ -423,7 +441,7 @@ func (fs *filesystem) MountLocal(ctx context.Context, mountpoint string, labels 
 	if err != nil {
 		return fmt.Errorf("cannot create remote store: %w", err)
 	}
-	fetcher, err := newArtifactFetcher(refspec, fs.contentStore, remoteStore)
+	fetcher, err := newArtifactFetcher(refspec, fs.contentStore, remoteStore, fs.maxPullConcurrency, fs.minConcurrencyLayerSize)
 	if err != nil {
 		return fmt.Errorf("cannot create fetcher: %w", err)
 	}
@@ -457,7 +475,7 @@ func (fs *filesystem) getSociContext(ctx context.Context, imageRef, indexDigest,
 	if !ok {
 		return nil, fmt.Errorf("could not load index: fs soci context is invalid type for %s", indexDigest)
 	}
-	err := c.Init(fs.ctx, ctx, imageRef, indexDigest, imageManifestDigest, fs.contentStore, fs.fuseMetricsEmitWaitDuration, client)
+	err := c.Init(fs.ctx, ctx, imageRef, indexDigest, imageManifestDigest, fs.contentStore, fs.fuseMetricsEmitWaitDuration, client, fs.maxPullConcurrency, fs.minConcurrencyLayerSize)
 	return c, err
 }
 

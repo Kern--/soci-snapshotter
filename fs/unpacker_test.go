@@ -159,12 +159,12 @@ func newFakeFetcher(hasLocal, storeFails, fetchFails bool) *fakeArtifactFetcher 
 	}
 }
 
-func (f *fakeArtifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, bool, error) {
+func (f *fakeArtifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([]io.ReadCloser, bool, error) {
 	f.fetchCount++
 	if f.fetchFails {
 		return nil, false, fmt.Errorf("dummy error on Fetch()")
 	}
-	return io.NopCloser(bytes.NewBuffer([]byte("test"))), f.hasLocal, nil
+	return []io.ReadCloser{io.NopCloser(bytes.NewBuffer([]byte("test")))}, f.hasLocal, nil
 }
 
 func (f *fakeArtifactFetcher) Store(ctx context.Context, desc ocispec.Descriptor, reader io.Reader) error {

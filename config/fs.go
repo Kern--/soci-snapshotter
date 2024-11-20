@@ -39,6 +39,7 @@
 package config
 
 import (
+	"runtime"
 	"strings"
 
 	"github.com/containerd/containerd/defaults"
@@ -56,6 +57,12 @@ type FSConfig struct {
 	NoPrometheus                   bool   `toml:"no_prometheus"`
 	MountTimeoutSec                int64  `toml:"mount_timeout_sec"`
 	FuseMetricsEmitWaitDurationSec int64  `toml:"fuse_metrics_emit_wait_duration_sec"`
+	// MaxPullConcurrency determines how many goroutines will be used to fetch and unpack data
+	MaxPullConcurrency int64 `toml:"max_fetch_concurrency"`
+	// MinConcurrencyLayerSize determines the min size, in bytes, at which we will do
+	// concurrent pull operations (i.e. any layer smaller than this will be pulled sequentially)
+	// Negative values will mean we will always do pull operations in segments of MaxPullConcurrency
+	MinConcurrencyLayerSize int64 `toml:"min_concurrency_layer_size"`
 
 	RetryableHTTPClientConfig `toml:"http"`
 	BlobConfig                `toml:"blob"`
@@ -187,6 +194,16 @@ func parseFSConfig(cfg *Config) {
 	if cfg.FuseMetricsEmitWaitDurationSec == 0 {
 		cfg.FuseMetricsEmitWaitDurationSec = defaultFuseMetricsEmitWaitDurationSec
 	}
+	if cfg.MaxPullConcurrency == 0 {
+		cfg.MaxPullConcurrency = int64(runtime.NumCPU()) / 8
+	}
+	if cfg.MinConcurrencyLayerSize == 0 {
+		cfg.MinConcurrencyLayerSize = defaultMinConcurrencyLayerSize
+	}
+	if cfg.MinConcurrencyLayerSize < 0 {
+		cfg.MinConcurrencyLayerSize = 0
+	}
+
 	if cfg.MaxConcurrency == 0 {
 		cfg.MaxConcurrency = defaultMaxConcurrency
 	}

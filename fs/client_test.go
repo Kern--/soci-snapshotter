@@ -43,7 +43,7 @@ func (f *fakeInner) Exists(ctx context.Context, desc ocispec.Descriptor) (bool, 
 	return false, nil
 }
 
-func (f *fakeInner) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+func (f *fakeInner) Fetch(ctx context.Context, desc ocispec.Descriptor, _, _ int64) (io.ReadCloser, error) {
 	return nil, nil
 }
 

@@ -105,6 +105,13 @@ func NewSociSnapshotterService(ctx context.Context, root string, serviceCfg *con
 	if serviceCfg.FSConfig.MaxConcurrency != 0 {
 		fsOpts = append(fsOpts, socifs.WithMaxConcurrency(serviceCfg.FSConfig.MaxConcurrency))
 	}
+	if serviceCfg.FSConfig.MaxPullConcurrency != 0 {
+		fsOpts = append(fsOpts, socifs.WithMaxPullConcurrency(serviceCfg.FSConfig.MaxPullConcurrency))
+	}
+	if serviceCfg.FSConfig.MinConcurrencyLayerSize != 0 {
+		fsOpts = append(fsOpts, socifs.WithMinConcurrencyLayerSize(serviceCfg.FSConfig.MinConcurrencyLayerSize))
+	}
+
 	fs, err := socifs.NewFilesystem(ctx, fsRoot(root), serviceCfg.FSConfig, fsOpts...)
 	if err != nil {
 		log.G(ctx).WithError(err).Fatalf("failed to configure filesystem")

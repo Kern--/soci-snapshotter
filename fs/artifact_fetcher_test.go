@@ -95,10 +95,11 @@ func TestArtifactFetcherFetch(t *testing.T) {
 				Size:   tc.size,
 			}
 
-			reader, _, err := fetcher.Fetch(context.Background(), desc)
+			rcs, _, err := fetcher.Fetch(context.Background(), desc)
 			if err != nil {
 				t.Fatal(err)
 			}
+			reader := combineReadClosers(rcs)
 			defer reader.Close()
 
 			readBytes, err := io.ReadAll(reader)
@@ -179,13 +180,14 @@ func TestArtifactFetcherFetchOnlyOnce(t *testing.T) {
 			}
 			ctx := context.Background()
 
-			reader, local, err := fetcher.Fetch(ctx, desc)
+			rcs, local, err := fetcher.Fetch(ctx, desc)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if local {
 				t.Fatalf("unexpected value of local; expected = false, got = true")
 			}
+			reader := combineReadClosers(rcs)
 			defer reader.Close()
 
 			err = fetcher.Store(ctx, desc, reader)
@@ -193,13 +195,14 @@ func TestArtifactFetcherFetchOnlyOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, local, err = fetcher.Fetch(ctx, desc)
+			rcs, local, err = fetcher.Fetch(ctx, desc)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !local {
 				t.Fatalf("unexpected value of local; expected = true, got = false")
 			}
+			reader = combineReadClosers(rcs)
 			defer reader.Close()
 
 			readBytes, err := io.ReadAll(reader)
@@ -260,7 +263,7 @@ func newFakeArtifactFetcher(ref string, contents []byte) (*artifactFetcher, erro
 	if err != nil {
 		return nil, err
 	}
-	return newArtifactFetcher(refspec, memory.New(), newFakeRemoteStore(contents))
+	return newArtifactFetcher(refspec, memory.New(), newFakeRemoteStore(contents), 0, 0)
 }
 
 func newFakeRemoteStore(contents []byte) resolverStorage {
@@ -275,7 +278,7 @@ type fakeRemoteStore struct {
 
 var _ content.Storage = &fakeRemoteStore{}
 
-func (f *fakeRemoteStore) Fetch(_ context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+func (f *fakeRemoteStore) Fetch(_ context.Context, desc ocispec.Descriptor, _, _ int64) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.contents)), nil
 }
 

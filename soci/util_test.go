@@ -44,8 +44,8 @@ func (m *OrasMemoryStore) Exists(ctx context.Context, target ocispec.Descriptor)
 	return m.s.Exists(ctx, target)
 }
 
-func (m *OrasMemoryStore) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCloser, error) {
-	return m.s.Fetch(ctx, target)
+func (m *OrasMemoryStore) Fetch(ctx context.Context, target ocispec.Descriptor, _, _ int64) (io.ReadCloser, error) {
+	return m.s.Fetch(ctx, target, 0, 0)
 }
 
 func (m *OrasMemoryStore) Push(ctx context.Context, expected ocispec.Descriptor, reader io.Reader) error {

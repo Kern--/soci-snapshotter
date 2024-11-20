@@ -38,7 +38,7 @@ import (
 // BasicStore describes the functionality common to oras-go oci.Store, oras-go memory.Store, and containerd ContentStore.
 type BasicStore interface {
 	Exists(ctx context.Context, target ocispec.Descriptor) (bool, error)
-	Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCloser, error)
+	Fetch(ctx context.Context, target ocispec.Descriptor, start, end int64) (io.ReadCloser, error)
 	Push(ctx context.Context, expected ocispec.Descriptor, reader io.Reader) error
 }
 
@@ -233,7 +233,7 @@ type sectionReaderAt struct {
 }
 
 // Fetch fetches the content identified by the descriptor.
-func (s *ContainerdStore) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCloser, error) {
+func (s *ContainerdStore) Fetch(ctx context.Context, target ocispec.Descriptor, _, _ int64) (io.ReadCloser, error) {
 	ctx = namespaces.WithNamespace(ctx, s.Namespace)
 	cs := s.client.ContentStore()
 	ra, err := cs.ReaderAt(ctx, target)

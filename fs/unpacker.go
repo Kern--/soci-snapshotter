@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -73,23 +76,39 @@ func NewLayerUnpacker(fetcher Fetcher, archive Archive) Unpacker {
 }
 
 func (lu *layerUnpacker) Unpack(ctx context.Context, desc ocispec.Descriptor, mountpoint string, mounts []mount.Mount) error {
-	rc, local, err := lu.fetcher.Fetch(ctx, desc)
+	rcs, local, err := lu.fetcher.Fetch(ctx, desc)
 	if err != nil {
 		return fmt.Errorf("cannot fetch layer: %w", err)
 	}
 
 	if !local {
-		err := lu.fetcher.Store(ctx, desc, rc)
-		rc.Close()
-		if err != nil {
-			return fmt.Errorf("cannot store layer: %w", err)
+		wg := new(sync.WaitGroup)
+		var hasErr atomic.Bool
+		for _, rc := range rcs {
+			wg.Add(1)
+
+			go func(rc io.ReadCloser) {
+				defer rc.Close()
+				defer wg.Done()
+
+				err := lu.fetcher.Store(ctx, desc, rc)
+				if err != nil {
+					log.G(ctx).Debugf("got error storing: %v", err)
+					hasErr.Store(true)
+				}
+			}(rc)
 		}
-		rc, _, err = lu.fetcher.Fetch(ctx, desc)
+		wg.Wait()
+		if hasErr.Load() {
+			return fmt.Errorf("cannot store layer")
+		}
+
+		rcs, _, err = lu.fetcher.Fetch(ctx, desc)
 		if err != nil {
-			return fmt.Errorf("cannot fetch layer: %w", err)
+			return fmt.Errorf("cannot fetch layer after storing: %w", err)
 		}
 	}
-	defer rc.Close()
+
 	parents, err := getLayerParents(mounts[0].Options)
 	if err != nil {
 		return fmt.Errorf("cannot get layer parents: %w", err)
@@ -100,9 +119,25 @@ func (lu *layerUnpacker) Unpack(ctx context.Context, desc ocispec.Descriptor, mo
 	if len(parents) > 0 {
 		opts = append(opts, archive.WithParents(parents))
 	}
-	_, err = lu.archive.Apply(ctx, mountpoint, rc, opts...)
-	if err != nil {
-		return fmt.Errorf("cannot apply layer: %w", err)
+
+	wg := new(sync.WaitGroup)
+	var hasErr atomic.Bool
+	for _, rc := range rcs {
+		wg.Add(1)
+
+		go func(rc io.ReadCloser) {
+			defer rc.Close()
+			defer wg.Done()
+
+			lu.archive.Apply(ctx, mountpoint, rc, opts...)
+			if err != nil {
+				hasErr.Store(true)
+			}
+		}(rc)
+	}
+	wg.Wait()
+	if hasErr.Load() {
+		return fmt.Errorf("cannot apply layer")
 	}
 
 	return nil

@@ -24,6 +24,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 
 	"github.com/awslabs/soci-snapshotter/soci"
 	"github.com/awslabs/soci-snapshotter/soci/store"
@@ -42,7 +44,7 @@ type Fetcher interface {
 	// Fetch fetches the artifact identified by the descriptor. It first checks the local content store
 	// and returns a `ReadCloser` from there. Otherwise it fetches from the remote, saves in the local content store
 	// and then returns a `ReadCloser`.
-	Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, bool, error)
+	Fetch(ctx context.Context, desc ocispec.Descriptor) ([]io.ReadCloser, bool, error)
 	// Store takes in a descriptor and io.Reader and stores it in the local store.
 	Store(ctx context.Context, desc ocispec.Descriptor, reader io.Reader) error
 }
@@ -56,15 +58,21 @@ type artifactFetcher struct {
 	remoteStore resolverStorage
 	localStore  store.BasicStore
 	refspec     reference.Spec
+
+	maxPullConcurrency int64
+	minConcurrencySize int64
 }
 
 // Constructs a new artifact fetcher
 // Takes in the image reference, the local store and the resolver
-func newArtifactFetcher(refspec reference.Spec, localStore store.BasicStore, remoteStore resolverStorage) (*artifactFetcher, error) {
+func newArtifactFetcher(refspec reference.Spec, localStore store.BasicStore, remoteStore resolverStorage, maxPullConcurrency, minConcurrencySize int64) (*artifactFetcher, error) {
+	log.G(context.Background()).Debugf("num cores: %d, min size: %d", maxPullConcurrency, minConcurrencySize)
 	return &artifactFetcher{
-		localStore:  localStore,
-		remoteStore: remoteStore,
-		refspec:     refspec,
+		localStore:         localStore,
+		remoteStore:        remoteStore,
+		refspec:            refspec,
+		maxPullConcurrency: maxPullConcurrency,
+		minConcurrencySize: minConcurrencySize,
 	}, nil
 }
 
@@ -88,15 +96,27 @@ func (f *artifactFetcher) constructRef(desc ocispec.Descriptor) string {
 	return fmt.Sprintf("%s@%s", f.refspec.Locator, desc.Digest.String())
 }
 
+// returns range [lower, upper] based on index, blob size, and max concurrency
+func getRange(i, size, maxProcesses int64) (lower, upper int64) {
+	partitionSize := size / maxProcesses
+	lower = i * partitionSize
+	if i == maxProcesses-1 {
+		partitionSize += size % maxProcesses
+	}
+	upper = lower + partitionSize - 1
+	return lower, upper
+}
+
 // Fetches the artifact identified by the descriptor.
 // It first checks the local store for the artifact.
 // If not found, if constructs the ref and fetches it from remote.
-func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, bool, error) {
-
+// If pulls in a layer are done sequentially, returns an array of size 1 with the io.ReadCloser.
+// If the daemon allows for concurrent pulls, it will return the streams in an ordered array
+func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([]io.ReadCloser, bool, error) {
 	// Check local store first
-	rc, err := f.localStore.Fetch(ctx, desc)
+	rc, err := f.localStore.Fetch(ctx, desc, 0, 0)
 	if err == nil {
-		return rc, true, nil
+		return []io.ReadCloser{rc}, true, nil
 	}
 
 	log.G(ctx).WithField("digest", desc.Digest.String()).Infof("fetching artifact from remote")
@@ -112,12 +132,57 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (i
 			return nil, false, fmt.Errorf("size of descriptor is 0; unable to resolve: %w", err)
 		}
 	}
-	rc, err = f.remoteStore.Fetch(ctx, desc)
+
+	rcs := []io.ReadCloser{}
+	// Pull at once if doesn't hit concurrency requirement
+	if desc.Size < f.minConcurrencySize || f.maxPullConcurrency <= 1 {
+		if desc.Size < f.minConcurrencySize {
+			log.G(ctx).Debugf("layer size (%d) smaller than concurrency layer size, pulling all at once", desc.Size)
+		} else {
+			log.G(ctx).Debugf("max_pull_concurrency is 1, pulling sequentially")
+		}
+		rc, err = f.remoteStore.Fetch(ctx, desc, 0, 0)
+		if err != nil {
+			return nil, false, fmt.Errorf("unable to fetch descriptor (%v) from remote store: %w", desc.Digest, err)
+		}
+		rcs = append(rcs, rc)
+	} else {
+		log.G(ctx).Debugf("pulling concurrently with %d processes", f.maxPullConcurrency)
+
+		wg := new(sync.WaitGroup)
+		var hasErr atomic.Bool
+
+		rcs = make([]io.ReadCloser, f.maxPullConcurrency)
+		for i := range f.maxPullConcurrency {
+			wg.Add(1)
+
+			go func(i int64) {
+				defer wg.Done()
+				lower, upper := getRange(i, desc.Size, f.maxPullConcurrency)
+
+				rc, err := f.remoteStore.Fetch(ctx, desc, lower, upper)
+				if err != nil {
+					log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("process %d returned error: %v", i, err)
+					hasErr.Store(true)
+					return
+				}
+
+				// Maintain order of fetched bytes
+				rcs[i] = rc
+			}(i)
+		}
+		wg.Wait()
+		err = nil
+		if hasErr.Load() {
+			err = errors.New("unable to fetch artifact from remote")
+		}
+	}
+
 	if err != nil {
 		return nil, false, fmt.Errorf("unable to fetch descriptor (%v) from remote store: %w", desc.Digest, err)
 	}
 
-	return rc, false, nil
+	return rcs, false, nil
 }
 
 func (f *artifactFetcher) resolve(ctx context.Context, desc ocispec.Descriptor) (ocispec.Descriptor, error) {
@@ -138,21 +203,32 @@ func (f *artifactFetcher) Store(ctx context.Context, desc ocispec.Descriptor, re
 	return nil
 }
 
-func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc ocispec.Descriptor, localStore store.Store, remoteStore resolverStorage) (*soci.Index, error) {
-	fetcher, err := newArtifactFetcher(refspec, localStore, remoteStore)
+func combineReadClosers(rcs []io.ReadCloser) io.ReadCloser {
+	fullContent := []byte{}
+	for _, rc := range rcs {
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		fullContent = append(fullContent, b...)
+	}
+	return io.NopCloser(bytes.NewReader(fullContent))
+}
+
+func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc ocispec.Descriptor, localStore store.Store, remoteStore resolverStorage, maxPullConcurrency, minConcurrencyLayerSize int64) (*soci.Index, error) {
+	fetcher, err := newArtifactFetcher(refspec, localStore, remoteStore, maxPullConcurrency, minConcurrencyLayerSize)
 	if err != nil {
 		return nil, fmt.Errorf("could not create an artifact fetcher: %w", err)
 	}
 
 	log.G(ctx).WithField("digest", indexDesc.Digest).Infof("fetching SOCI index from remote registry")
 
-	indexReader, local, err := fetcher.Fetch(ctx, indexDesc)
+	rcs, local, err := fetcher.Fetch(ctx, indexDesc)
 	if err != nil {
 		return nil, fmt.Errorf("unable to fetch SOCI index: %w", err)
 	}
-	defer indexReader.Close()
+	r := combineReadClosers(rcs)
+	defer r.Close()
 
-	tr := ioutils.NewPositionTrackerReader(indexReader)
+	tr := ioutils.NewPositionTrackerReader(r)
 
 	var index soci.Index
 	err = soci.DecodeIndex(tr, &index)
@@ -194,17 +270,35 @@ func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc o
 		blob := blob
 		i := i
 		eg.Go(func() error {
-			rc, local, err := fetcher.Fetch(ctx, blob)
+			rcs, local, err := fetcher.Fetch(ctx, blob)
 			if err != nil {
 				return fmt.Errorf("cannot fetch artifact: %w", err)
 			}
-			defer rc.Close()
 			if local {
 				return nil
 			}
-			if err := fetcher.Store(ctx, blob, rc); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
-				return fmt.Errorf("unable to store ztoc in local store: %w", err)
+
+			wg := new(sync.WaitGroup)
+			var hasErr atomic.Bool
+			for _, rc := range rcs {
+				wg.Add(1)
+
+				go func(rc io.ReadCloser) {
+					defer rc.Close()
+					defer wg.Done()
+
+					if err := fetcher.Store(ctx, blob, rc); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+						hasErr.Store(true)
+						// return fmt.Errorf("unable to store ztoc in local store: %w", err)
+					}
+				}(rc)
 			}
+			wg.Wait()
+
+			if hasErr.Load() {
+				return errors.New("unable to store ztoc in local store")
+			}
+
 			return store.LabelGCRefContent(ctx, localStore, desc, "ztoc."+strconv.Itoa(i), blob.Digest.String())
 		})
 	}

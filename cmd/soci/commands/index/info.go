@@ -59,7 +59,7 @@ var infoCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		reader, err := store.Fetch(ctx, v1.Descriptor{Digest: digest})
+		reader, err := store.Fetch(ctx, v1.Descriptor{Digest: digest}, 0, 0)
 		if err != nil {
 			return err
 		}

@@ -276,7 +276,7 @@ func (r *Resolver) Resolve(ctx context.Context, hosts []docker.RegistryHost, ref
 		}
 	}()
 
-	ztocReader, err := r.artifactStore.Fetch(ctx, sociDesc)
+	ztocReader, err := r.artifactStore.Fetch(ctx, sociDesc, 0, 0)
 	if err != nil {
 		return nil, err
 	}

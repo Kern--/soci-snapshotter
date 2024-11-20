@@ -92,7 +92,7 @@ func getZtoc(ctx context.Context, cliContext *cli.Context, d digest.Digest) (*zt
 		return nil, err
 	}
 
-	reader, err := blobStore.Fetch(ctx, v1.Descriptor{Digest: d})
+	reader, err := blobStore.Fetch(ctx, v1.Descriptor{Digest: d}, 0, 0)
 	if err != nil {
 		return nil, err
 	}
