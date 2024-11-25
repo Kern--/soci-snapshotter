@@ -108,6 +108,8 @@ func (lu *layerUnpacker) Unpack(ctx context.Context, desc ocispec.Descriptor, mo
 			return fmt.Errorf("cannot fetch layer after storing: %w", err)
 		}
 	}
+	rc := combineReadClosers(rcs)
+	defer rc.Close()
 
 	parents, err := getLayerParents(mounts[0].Options)
 	if err != nil {
@@ -120,24 +122,9 @@ func (lu *layerUnpacker) Unpack(ctx context.Context, desc ocispec.Descriptor, mo
 		opts = append(opts, archive.WithParents(parents))
 	}
 
-	wg := new(sync.WaitGroup)
-	var hasErr atomic.Bool
-	for _, rc := range rcs {
-		wg.Add(1)
-
-		go func(rc io.ReadCloser) {
-			defer rc.Close()
-			defer wg.Done()
-
-			lu.archive.Apply(ctx, mountpoint, rc, opts...)
-			if err != nil {
-				hasErr.Store(true)
-			}
-		}(rc)
-	}
-	wg.Wait()
-	if hasErr.Load() {
-		return fmt.Errorf("cannot apply layer")
+	_, err = lu.archive.Apply(ctx, mountpoint, rc, opts...)
+	if err != nil {
+		return fmt.Errorf("cannot apply layer: %w", err)
 	}
 
 	return nil

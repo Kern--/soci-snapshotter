@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/awslabs/soci-snapshotter/soci"
 	"github.com/awslabs/soci-snapshotter/soci/store"
@@ -133,7 +134,10 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 		}
 	}
 
-	rcs := []io.ReadCloser{}
+	start := time.Now()
+	var rcs []io.ReadCloser
+
+	log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("layer size: %d", desc.Size)
 	// Pull at once if doesn't hit concurrency requirement
 	if desc.Size < f.minConcurrencySize || f.maxPullConcurrency <= 1 {
 		if desc.Size < f.minConcurrencySize {
@@ -145,7 +149,7 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 		if err != nil {
 			return nil, false, fmt.Errorf("unable to fetch descriptor (%v) from remote store: %w", desc.Digest, err)
 		}
-		rcs = append(rcs, rc)
+		rcs = []io.ReadCloser{rc}
 	} else {
 		log.G(ctx).Debugf("pulling concurrently with %d processes", f.maxPullConcurrency)
 
@@ -172,11 +176,14 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 			}(i)
 		}
 		wg.Wait()
+		log.G(ctx).Debug("waited successfully")
 		err = nil
 		if hasErr.Load() {
 			err = errors.New("unable to fetch artifact from remote")
 		}
 	}
+	end := time.Now()
+	log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("completed layer pull in %d seconds", start.Unix()-end.Unix())
 
 	if err != nil {
 		return nil, false, fmt.Errorf("unable to fetch descriptor (%v) from remote store: %w", desc.Digest, err)
@@ -204,6 +211,10 @@ func (f *artifactFetcher) Store(ctx context.Context, desc ocispec.Descriptor, re
 }
 
 func combineReadClosers(rcs []io.ReadCloser) io.ReadCloser {
+	if len(rcs) == 1 {
+		return rcs[0]
+	}
+
 	fullContent := []byte{}
 	for _, rc := range rcs {
 		b, _ := io.ReadAll(rc)
