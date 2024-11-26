@@ -21,13 +21,10 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -82,33 +79,26 @@ func (lu *layerUnpacker) Unpack(ctx context.Context, desc ocispec.Descriptor, mo
 	}
 
 	if !local {
-		wg := new(sync.WaitGroup)
-		var hasErr atomic.Bool
-		for _, rc := range rcs {
-			wg.Add(1)
-
-			go func(rc io.ReadCloser) {
-				defer rc.Close()
-				defer wg.Done()
-
-				err := lu.fetcher.Store(ctx, desc, rc)
-				if err != nil {
-					log.G(ctx).Debugf("got error storing: %v", err)
-					hasErr.Store(true)
-				}
-			}(rc)
+		rc, err := combineReadClosers(rcs, desc.Size)
+		if err != nil {
+			return err
 		}
-		wg.Wait()
-		if hasErr.Load() {
-			return fmt.Errorf("cannot store layer")
+
+		err = lu.fetcher.Store(ctx, desc, rc)
+		if err != nil {
+			return fmt.Errorf("got error storing: %v", err)
 		}
+		rc.Close()
 
 		rcs, _, err = lu.fetcher.Fetch(ctx, desc)
 		if err != nil {
 			return fmt.Errorf("cannot fetch layer after storing: %w", err)
 		}
 	}
-	rc := combineReadClosers(rcs)
+	rc, err := combineReadClosers(rcs, desc.Size)
+	if err != nil {
+		return err
+	}
 	defer rc.Close()
 
 	parents, err := getLayerParents(mounts[0].Options)

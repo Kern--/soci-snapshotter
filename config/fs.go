@@ -195,7 +195,7 @@ func parseFSConfig(cfg *Config) {
 		cfg.FuseMetricsEmitWaitDurationSec = defaultFuseMetricsEmitWaitDurationSec
 	}
 	if cfg.MaxPullConcurrency == 0 {
-		cfg.MaxPullConcurrency = int64(runtime.NumCPU()) / 8
+		cfg.MaxPullConcurrency = int64(runtime.NumCPU())
 	}
 	if cfg.MinConcurrencyLayerSize == 0 {
 		cfg.MinConcurrencyLayerSize = defaultMinConcurrencyLayerSize

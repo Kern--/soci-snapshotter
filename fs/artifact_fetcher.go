@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/awslabs/soci-snapshotter/soci"
 	"github.com/awslabs/soci-snapshotter/soci/store"
@@ -67,7 +66,7 @@ type artifactFetcher struct {
 // Constructs a new artifact fetcher
 // Takes in the image reference, the local store and the resolver
 func newArtifactFetcher(refspec reference.Spec, localStore store.BasicStore, remoteStore resolverStorage, maxPullConcurrency, minConcurrencySize int64) (*artifactFetcher, error) {
-	log.G(context.Background()).Debugf("num cores: %d, min size: %d", maxPullConcurrency, minConcurrencySize)
+	log.G(context.Background()).Debugf("num concurrent processes: %d, min size: %d", maxPullConcurrency, minConcurrencySize)
 	return &artifactFetcher{
 		localStore:         localStore,
 		remoteStore:        remoteStore,
@@ -134,7 +133,6 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 		}
 	}
 
-	start := time.Now()
 	var rcs []io.ReadCloser
 
 	log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("layer size: %d", desc.Size)
@@ -176,14 +174,11 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 			}(i)
 		}
 		wg.Wait()
-		log.G(ctx).Debug("waited successfully")
 		err = nil
 		if hasErr.Load() {
 			err = errors.New("unable to fetch artifact from remote")
 		}
 	}
-	end := time.Now()
-	log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("completed layer pull in %d seconds", start.Unix()-end.Unix())
 
 	if err != nil {
 		return nil, false, fmt.Errorf("unable to fetch descriptor (%v) from remote store: %w", desc.Digest, err)
@@ -210,18 +205,34 @@ func (f *artifactFetcher) Store(ctx context.Context, desc ocispec.Descriptor, re
 	return nil
 }
 
-func combineReadClosers(rcs []io.ReadCloser) io.ReadCloser {
-	if len(rcs) == 1 {
-		return rcs[0]
+// combineReadClosers concurrently combines the readclosers into a single readcloser,
+// consuming the readers in the process.
+func combineReadClosers(rcs []io.ReadCloser, size int64) (io.ReadCloser, error) {
+	if size == 0 {
+		return nil, errors.New("size of descriptor is zero")
 	}
 
-	fullContent := []byte{}
-	for _, rc := range rcs {
-		b, _ := io.ReadAll(rc)
-		rc.Close()
-		fullContent = append(fullContent, b...)
+	if len(rcs) == 1 {
+		return rcs[0], nil
 	}
-	return io.NopCloser(bytes.NewReader(fullContent))
+
+	wg := new(sync.WaitGroup)
+	fullContent := make([]byte, size)
+	for i, rc := range rcs {
+		wg.Add(1)
+
+		go func(i int, rc io.ReadCloser) {
+			defer wg.Done()
+			defer rc.Close()
+
+			lower, upper := getRange(int64(i), size, int64(len(rcs)))
+			b, _ := io.ReadAll(rc)
+			copy(fullContent[lower:upper+1], b)
+		}(i, rc)
+	}
+	wg.Wait()
+
+	return io.NopCloser(bytes.NewReader(fullContent)), nil
 }
 
 func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc ocispec.Descriptor, localStore store.Store, remoteStore resolverStorage, maxPullConcurrency, minConcurrencyLayerSize int64) (*soci.Index, error) {
@@ -236,7 +247,10 @@ func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc o
 	if err != nil {
 		return nil, fmt.Errorf("unable to fetch SOCI index: %w", err)
 	}
-	r := combineReadClosers(rcs)
+	r, err := combineReadClosers(rcs, indexDesc.Size)
+	if err != nil {
+		return nil, err
+	}
 	defer r.Close()
 
 	tr := ioutils.NewPositionTrackerReader(r)
@@ -288,26 +302,14 @@ func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc o
 			if local {
 				return nil
 			}
-
-			wg := new(sync.WaitGroup)
-			var hasErr atomic.Bool
-			for _, rc := range rcs {
-				wg.Add(1)
-
-				go func(rc io.ReadCloser) {
-					defer rc.Close()
-					defer wg.Done()
-
-					if err := fetcher.Store(ctx, blob, rc); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
-						hasErr.Store(true)
-						// return fmt.Errorf("unable to store ztoc in local store: %w", err)
-					}
-				}(rc)
+			rc, err := combineReadClosers(rcs, blob.Size)
+			if err != nil {
+				return err
 			}
-			wg.Wait()
+			defer rc.Close()
 
-			if hasErr.Load() {
-				return errors.New("unable to store ztoc in local store")
+			if err := fetcher.Store(ctx, blob, rc); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+				return fmt.Errorf("unable to store ztoc in local store: %w", err)
 			}
 
 			return store.LabelGCRefContent(ctx, localStore, desc, "ztoc."+strconv.Itoa(i), blob.Digest.String())

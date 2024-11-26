@@ -99,7 +99,7 @@ func TestArtifactFetcherFetch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reader := combineReadClosers(rcs)
+			reader, _ := combineReadClosers(rcs, desc.Size)
 			defer reader.Close()
 
 			readBytes, err := io.ReadAll(reader)
@@ -187,7 +187,7 @@ func TestArtifactFetcherFetchOnlyOnce(t *testing.T) {
 			if local {
 				t.Fatalf("unexpected value of local; expected = false, got = true")
 			}
-			reader := combineReadClosers(rcs)
+			reader, _ := combineReadClosers(rcs, desc.Size)
 			defer reader.Close()
 
 			err = fetcher.Store(ctx, desc, reader)
@@ -202,7 +202,7 @@ func TestArtifactFetcherFetchOnlyOnce(t *testing.T) {
 			if !local {
 				t.Fatalf("unexpected value of local; expected = true, got = false")
 			}
-			reader = combineReadClosers(rcs)
+			reader, _ = combineReadClosers(rcs, desc.Size)
 			defer reader.Close()
 
 			readBytes, err := io.ReadAll(reader)
