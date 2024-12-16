@@ -42,6 +42,9 @@ import (
 	"oras.land/oras-go/v2/registry/remote"
 )
 
+// Max memory buffer size per process per layer. This should be moved into config.
+var maxBufferSize int64 = 1 << 20 // 1 MiB
+
 type Fetcher interface {
 	// Fetch fetches the artifact identified by the descriptor. It first checks the local content store
 	// and returns a `ReadCloser` from there. Otherwise it fetches from the remote, saves in the local content store
@@ -325,30 +328,56 @@ func FetchSociArtifacts(ctx context.Context, refspec reference.Spec, indexDesc o
 
 func (f *artifactFetcher) StoreInParallel(ctx context.Context, blob ocispec.Descriptor, rcs []io.ReadCloser) error {
 	sha256dir := filepath.Join("/var/lib/soci-snapshotter-grpc/content/blobs", blob.Digest.Algorithm().String())
-	err := os.MkdirAll(sha256dir, os.ModePerm)
-	if err != nil {
-		return err
+	if _, err := os.Stat(sha256dir); err != nil {
+		err := os.MkdirAll(sha256dir, os.ModePerm)
+		if err != nil {
+			return err
+		}
 	}
+
 	blobPath := filepath.Join(sha256dir, blob.Digest.Encoded())
 	file, err := os.Create(blobPath)
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
 	wg := new(sync.WaitGroup)
 	for i, rc := range rcs {
+		rc := rc
 		wg.Add(1)
-
 		go func(i int64, rc io.ReadCloser) {
 			defer wg.Done()
-			defer rc.Close()
-
-			lower, _ := getRange(i, blob.Size, f.maxPullConcurrency)
-			content, _ := io.ReadAll(rc)
-			file.WriteAt(content, lower)
+			lower, upper := getRange(i, blob.Size, int64(len(rcs)))
+			writeInChunks(file, rc, lower, upper)
 		}(int64(i), rc)
 	}
 	wg.Wait()
 
 	return nil
+}
+
+func writeInChunks(file *os.File, rc io.ReadCloser, lower, upper int64) {
+	defer rc.Close()
+
+	chunkSize := upper - lower + 1
+	bufSize := maxBufferSize
+	if chunkSize < bufSize {
+		bufSize = chunkSize
+	}
+
+	var buf []byte
+	n := 1
+	for n != 0 {
+		buf = make([]byte, bufSize)
+		n, err := rc.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.G(context.Background()).WithField("file", file.Name()).Infof("failed to write to file %v: %v", file.Name(), err)
+			}
+			break
+		}
+		file.WriteAt(buf[:n], lower)
+		lower += int64(n)
+	}
 }
