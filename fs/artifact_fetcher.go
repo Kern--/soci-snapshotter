@@ -166,7 +166,6 @@ func (f *artifactFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) ([
 			go func(i int64) {
 				defer wg.Done()
 				lower, upper := getRange(i, desc.Size, f.maxPullConcurrency)
-
 				rc, err := f.remoteStore.Fetch(ctx, desc, lower, upper)
 				if err != nil {
 					log.G(ctx).WithField("digest", desc.Digest.String()).Debugf("process %d returned error: %v", i, err)
@@ -340,12 +339,14 @@ func (f *artifactFetcher) StoreInParallel(ctx context.Context, blob ocispec.Desc
 	if err != nil {
 		return err
 	}
+	file.Truncate(blob.Size)
 	defer file.Close()
 
 	wg := new(sync.WaitGroup)
 	for i, rc := range rcs {
 		rc := rc
 		wg.Add(1)
+
 		go func(i int64, rc io.ReadCloser) {
 			defer wg.Done()
 			lower, upper := getRange(i, blob.Size, int64(len(rcs)))
@@ -368,16 +369,18 @@ func writeInChunks(file *os.File, rc io.ReadCloser, lower, upper int64) {
 
 	var buf []byte
 	n := 1
+	buf = make([]byte, bufSize)
 	for n != 0 {
-		buf = make([]byte, bufSize)
 		n, err := rc.Read(buf)
+		if n != 0 {
+			file.WriteAt(buf[:n], lower)
+			lower += int64(n)
+		}
 		if err != nil {
 			if err != io.EOF {
 				log.G(context.Background()).WithField("file", file.Name()).Infof("failed to write to file %v: %v", file.Name(), err)
 			}
 			break
 		}
-		file.WriteAt(buf[:n], lower)
-		lower += int64(n)
 	}
 }
