@@ -418,7 +418,7 @@ func (m *SpanManager) addSpanToCache(spanID compression.SpanID, contents []byte,
 // `offset` is the offset of the requested contents within the span.
 // `size` is the size of the requested contents.
 func (m *SpanManager) getSpanFromCache(spanID compression.SpanID, offset, size compression.Offset) (io.ReadCloser, error) {
-	rc, err := m.cache.Get(fmt.Sprintf("%d", spanID))
+	rc, err := m.cache.Get(fmt.Sprintf("%d", spanID), m.cacheOpt...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSpanNotAvailable, err)
 	}
