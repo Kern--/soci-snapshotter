@@ -19,6 +19,7 @@ package spanmanager
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,26 +50,27 @@ type SpanManager struct {
 	spans                             []*span
 	ztoc                              *ztoc.Ztoc
 	maxSpanVerificationFailureRetries int
+	layerDigest                       string
 }
 
 type spanInfo struct {
 	// starting span id of the requested contents
-	spanStart compression.SpanID
+	SpanStart compression.SpanID `json:"start_span"`
 	// ending span id of the requested contents
-	spanEnd compression.SpanID
+	SpanEnd compression.SpanID `json:"end_span"`
 	// start offsets of the requested contents within the spans
-	startOffInSpan []compression.Offset
+	StartOffInSpan []compression.Offset `json:"start_offsets"`
 	// end offsets the requested contents within the spans
-	endOffInSpan []compression.Offset
+	EndOffInSpan []compression.Offset `json:"end_offsets"`
 	// indexes of the spans in the buffer
-	spanIndexInBuf []compression.Offset
+	SpanIndexInBuf []compression.Offset `json:"buffer_offsets"`
 }
 
 // New creates a SpanManager with given ztoc and content reader, and builds all
 // spans based on the ztoc.
 
 // TODO: return errors/nil objects on failure
-func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, cacheOpt ...cache.Option) *SpanManager {
+func New(layerdigest string, ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, cacheOpt ...cache.Option) *SpanManager {
 	index, err := ztoc.Zinfo()
 	if err != nil {
 		return nil
@@ -94,6 +96,7 @@ func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries in
 		spans:                             spans,
 		ztoc:                              ztoc,
 		maxSpanVerificationFailureRetries: retries,
+		layerDigest:                       layerdigest,
 	}
 	if m.maxSpanVerificationFailureRetries < 0 {
 		m.maxSpanVerificationFailureRetries = defaultSpanVerificationFailureRetries
@@ -163,7 +166,7 @@ func (m *SpanManager) resolveSpan(spanID compression.SpanID) error {
 // across multiple spans.
 func (m *SpanManager) GetContents(startUncompOffset, endUncompOffset compression.Offset) (io.ReadCloser, error) {
 	si := m.getSpanInfo(startUncompOffset, endUncompOffset)
-	numSpans := si.spanEnd - si.spanStart + 1
+	numSpans := si.SpanEnd - si.SpanStart + 1
 	spanReaders := make([]io.ReadCloser, numSpans)
 
 	eg, _ := errgroup.WithContext(context.Background())
@@ -171,8 +174,10 @@ func (m *SpanManager) GetContents(startUncompOffset, endUncompOffset compression
 	for i = 0; i < numSpans; i++ {
 		j := i
 		eg.Go(func() error {
-			spanID := j + si.spanStart
-			r, err := m.getSpanContent(spanID, si.startOffInSpan[j], si.endOffInSpan[j])
+			spanID := j + si.SpanStart
+			data, _ := json.Marshal(si)
+			log.L.WithField("layer", m.layerDigest).WithField("span info", data).WithField("j", j).Debug("fetching span")
+			r, err := m.getSpanContent(spanID, si.StartOffInSpan[j], si.EndOffInSpan[j])
 			if err != nil {
 				return err
 			}
@@ -212,11 +217,11 @@ func (m *SpanManager) getSpanInfo(offsetStart, offsetEnd compression.Offset) *sp
 		bufSize += end[j] - start[j]
 	}
 	spanInfo := spanInfo{
-		spanStart:      spanStart,
-		spanEnd:        spanEnd,
-		startOffInSpan: start,
-		endOffInSpan:   end,
-		spanIndexInBuf: index,
+		SpanStart:      spanStart,
+		SpanEnd:        spanEnd,
+		StartOffInSpan: start,
+		EndOffInSpan:   end,
+		SpanIndexInBuf: index,
 	}
 	return &spanInfo
 }
@@ -234,9 +239,11 @@ func (m *SpanManager) getSpanInfo(offsetStart, offsetEnd compression.Offset) *sp
 func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, offsetEnd compression.Offset) (io.ReadCloser, error) {
 	s := m.spans[spanID]
 	size := offsetEnd - offsetStart
+	logger := log.L.WithField("layer", m.layerDigest).WithField("id", spanID).WithField("end-offset", offsetEnd).WithField("start-offset", offsetStart)
 
 	// return from cache directly if cached and uncompressed
 	if s.checkState(uncompressed) {
+		logger.Debug("returning span from cache")
 		return m.getSpanFromCache(s.id, offsetStart, size)
 	}
 
@@ -244,6 +251,7 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 	defer s.mu.Unlock()
 	// check again after acquiring lock
 	if s.checkState(uncompressed) {
+		logger.Debug("returning span from cache")
 		return m.getSpanFromCache(s.id, offsetStart, size)
 	}
 
@@ -276,6 +284,7 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 		if err := s.setState(uncompressed); err != nil {
 			return nil, err
 		}
+		logger.Debug("returning previously fetched span")
 		return io.NopCloser(bytes.NewReader(uncompSpanBuf[offsetStart : offsetStart+size])), nil
 	}
 
@@ -285,6 +294,7 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("returning newly fetched span")
 	buf := bytes.NewBuffer(uncompBuf[offsetStart : offsetStart+size])
 	return io.NopCloser(buf), nil
 }
@@ -398,19 +408,17 @@ func (m *SpanManager) addSpanToCache(spanID compression.SpanID, contents []byte,
 
 	_, err = w.Write(contents)
 	if err != nil {
-		w.Abort()
-		return err
+		return errors.Join(err, w.Abort())
 	}
 
-	w.Commit()
-	return nil
+	return w.Commit()
 }
 
 // getSpanFromCache returns the cached span content as an `io.Reader`.
 // `offset` is the offset of the requested contents within the span.
 // `size` is the size of the requested contents.
 func (m *SpanManager) getSpanFromCache(spanID compression.SpanID, offset, size compression.Offset) (io.ReadCloser, error) {
-	rc, err := m.cache.Get(fmt.Sprintf("%d", spanID))
+	rc, err := m.cache.Get(fmt.Sprintf("%d", spanID), m.cacheOpt...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSpanNotAvailable, err)
 	}

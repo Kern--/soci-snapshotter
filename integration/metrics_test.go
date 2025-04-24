@@ -44,29 +44,20 @@ const (
 	metricsPath        = "/metrics"
 )
 
-const tcpMetricsConfig = `
-metrics_address="` + tcpMetricsAddress + `"
-`
-
-const unixMetricsConfig = `
-metrics_address="` + unixMetricsAddress + `"
-metrics_network="unix"
-`
-
 func TestMetrics(t *testing.T) {
 	tests := []struct {
 		name    string
-		config  string
+		config  snapshotterConfigOpt
 		command []string
 	}{
 		{
 			name:    "tcp",
-			config:  tcpMetricsConfig,
+			config:  withTCPMetrics,
 			command: []string{"curl", "--fail", tcpMetricsAddress + metricsPath},
 		},
 		{
 			name:    "unix",
-			config:  unixMetricsConfig,
+			config:  withUnixMetrics,
 			command: []string{"curl", "--fail", "--unix-socket", unixMetricsAddress, "http://localhost" + metricsPath},
 		},
 	}
@@ -75,7 +66,7 @@ func TestMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sh, done := newSnapshotterBaseShell(t)
 			defer done()
-			rebootContainerd(t, sh, "", tt.config)
+			rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, tt.config))
 			sh.X(tt.command...)
 			if err := sh.Err(); err != nil {
 				t.Fatal(err)
@@ -150,11 +141,9 @@ func TestOverlayFallbackMetric(t *testing.T) {
 	for _, tc := range testCases {
 		for _, contentStoreType := range store.ContentStoreTypes() {
 			t.Run(tc.name+" with "+string(contentStoreType)+" content store", func(t *testing.T) {
-				rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig, GetContentStoreConfigToml(store.WithType(contentStoreType))))
+				rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics, withContentStoreConfig(store.WithType(contentStoreType))))
 
 				imgInfo := dockerhub(tc.image)
-
-				sh.X("nerdctl", "pull", "-q", imgInfo.ref)
 				indexDigest := tc.indexDigestFn(sh, contentStoreType, imgInfo)
 
 				sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, imgInfo.ref)...)
@@ -169,10 +158,9 @@ func TestOverlayFallbackMetric(t *testing.T) {
 }
 
 func TestFuseOperationFailureMetrics(t *testing.T) {
-	const logFuseOperationConfig = `
-[fuse]
-log_fuse_operations = true
-`
+	var withLogFuseOperations = func(cfg *config.Config) {
+		cfg.ServiceConfig.FSConfig.FuseConfig.LogFuseOperations = true
+	}
 
 	sh, done := newSnapshotterBaseShell(t)
 	defer done()
@@ -249,7 +237,7 @@ log_fuse_operations = true
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig, logFuseOperationConfig))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics, withLogFuseOperations, withContentStoreConfig(store.WithType(store.ContainerdContentStoreType))))
 
 			imgInfo := dockerhub(tc.image)
 			sh.X("nerdctl", "pull", "-q", imgInfo.ref)
@@ -272,11 +260,14 @@ log_fuse_operations = true
 }
 
 func TestFuseOperationCountMetrics(t *testing.T) {
-	const snapshotterConfig = `
-fuse_metrics_emit_wait_duration_sec = 10
-	`
+	var withFuseWaitDuration = func(i int64) snapshotterConfigOpt {
+		return func(c *config.Config) {
+			c.ServiceConfig.FSConfig.FuseMetricsEmitWaitDurationSec = i
+		}
+	}
 
-	sh, done := newSnapshotterBaseShell(t)
+	registryConfig := newRegistryConfig()
+	sh, done := newShellWithRegistry(t, registryConfig)
 	defer done()
 
 	testCases := []struct {
@@ -291,14 +282,16 @@ fuse_metrics_emit_wait_duration_sec = 10
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig, snapshotterConfig))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics, withFuseWaitDuration(10)))
 
 			imgInfo := dockerhub(tc.image)
-			sh.X("nerdctl", "pull", "-q", imgInfo.ref)
-			indexDigest := buildIndex(sh, imgInfo)
+			dstInfo := registryConfig.mirror(tc.image)
+			copyImage(sh, imgInfo, dstInfo)
+			indexDigest := buildIndex(sh, dstInfo)
+			sh.X("soci", "push", "--user", dstInfo.creds, dstInfo.ref)
 
-			sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, imgInfo.ref)...)
-			sh.XLog(append(runSociCmd, "--name", "test", "-d", imgInfo.ref, "echo", "hi")...)
+			sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, dstInfo.ref)...)
+			sh.XLog(append(runSociCmd, "--name", "test", "-d", dstInfo.ref, "echo", "hi")...)
 
 			curlOutput := string(sh.O("curl", tcpMetricsAddress+metricsPath))
 
@@ -321,19 +314,19 @@ fuse_metrics_emit_wait_duration_sec = 10
 }
 
 func TestBackgroundFetchMetrics(t *testing.T) {
-	const backgroundFetchConfig = `
-[background_fetch]
-silence_period_msec = 1000
-fetch_period_msec = 100
-emit_metric_period_sec = 2
-	`
+	var withCustomBgFetchConfig = func(cfg *config.Config) {
+		cfg.ServiceConfig.FSConfig.BackgroundFetchConfig.SilencePeriodMsec = 100
+		cfg.ServiceConfig.FSConfig.BackgroundFetchConfig.FetchPeriodMsec = 100
+		cfg.ServiceConfig.FSConfig.BackgroundFetchConfig.EmitMetricPeriodSec = 2
+	}
 
 	bgFetchMetricsToCheck := []string{
 		commonmetrics.BackgroundFetchWorkQueueSize,
 		commonmetrics.BackgroundSpanFetchCount,
 	}
 
-	sh, done := newSnapshotterBaseShell(t)
+	regConfig := newRegistryConfig()
+	sh, done := newShellWithRegistry(t, regConfig)
 	defer done()
 
 	testCases := []struct {
@@ -348,14 +341,16 @@ emit_metric_period_sec = 2
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig, backgroundFetchConfig))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics, withCustomBgFetchConfig))
 
 			imgInfo := dockerhub(tc.image)
-			sh.X("nerdctl", "pull", "-q", imgInfo.ref)
-			indexDigest := buildIndex(sh, imgInfo)
+			dstInfo := regConfig.mirror(tc.image)
+			copyImage(sh, imgInfo, dstInfo)
+			indexDigest := buildIndex(sh, dstInfo)
+			sh.X("soci", "push", "--user", dstInfo.creds, dstInfo.ref)
 
-			sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, imgInfo.ref)...)
-			sh.XLog(append(runSociCmd, "--name", "test", "-d", imgInfo.ref, "echo", "hi")...)
+			sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, dstInfo.ref)...)
+			sh.XLog(append(runSociCmd, "--name", "test", "-d", dstInfo.ref, "echo", "hi")...)
 
 			time.Sleep(5 * time.Second)
 			curlOutput := string(sh.O("curl", tcpMetricsAddress+metricsPath))
@@ -406,7 +401,7 @@ func buildIndexByManipulatingZtocData(sh *shell.Shell, indexDigest string, manip
 		if err != nil {
 			return "", fmt.Errorf("unable to marshal ztoc %s: %s", newZtocDesc.Digest.String(), err)
 		}
-		err = testutil.InjectContentStoreContentFromReader(sh, config.DefaultContentStoreType, newZtocDesc, newZtocReader)
+		err = testutil.InjectContentStoreContentFromReader(sh, config.DefaultContentStoreType, indexDigest, newZtocDesc, newZtocReader)
 		if err != nil {
 			return "", fmt.Errorf("cannot inject manipulated ztoc %s: %w", newZtocDesc.Digest.String(), err)
 		}
@@ -421,7 +416,7 @@ func buildIndexByManipulatingZtocData(sh *shell.Shell, indexDigest string, manip
 		Size:   index.Subject.Size,
 	}
 
-	newIndex := soci.NewIndex(newZtocDescs, &subject, nil)
+	newIndex := soci.NewIndex(soci.V1, newZtocDescs, &subject, nil)
 	b, err := soci.MarshalIndex(newIndex)
 	if err != nil {
 		return "", err
@@ -429,7 +424,7 @@ func buildIndexByManipulatingZtocData(sh *shell.Shell, indexDigest string, manip
 
 	newIndexDigest := digest.FromBytes(b)
 	desc := ocispec.Descriptor{Digest: newIndexDigest}
-	err = testutil.InjectContentStoreContentFromBytes(sh, config.DefaultContentStoreType, desc, b)
+	err = testutil.InjectContentStoreContentFromBytes(sh, config.DefaultContentStoreType, indexDigest, desc, b)
 	if err != nil {
 		return "", err
 	}

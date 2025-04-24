@@ -17,10 +17,12 @@
 package integration
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/awslabs/soci-snapshotter/config"
 	shell "github.com/awslabs/soci-snapshotter/util/dockershell"
 )
 
@@ -29,10 +31,10 @@ import (
 // This tests a regression with the first implementation of systemd socket activation
 // where we moved creation of the directory later which caused the metrics address
 // bind to fail. This verifies that the directory gets created before binding the metrics socket.
-const metricsConfig = `
-metrics_address="/run/soci-snapshotter-grpc/metrics.sock"
-metrics_network="unix"
-`
+func withCustomMetricsConfig(cfg *config.Config) {
+	cfg.MetricsAddress = "/run/soci-snapshotter-grpc/metrics.sock"
+	cfg.MetricsNetwork = "unix"
+}
 
 // TestSnapshotterStartup tests to run containerd + snapshotter and check plugin is
 // recognized by containerd
@@ -40,7 +42,7 @@ func TestSnapshotterStartup(t *testing.T) {
 	t.Parallel()
 	sh, done := newSnapshotterBaseShell(t)
 	defer done()
-	rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, false, metricsConfig))
+	rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, withCustomMetricsConfig))
 	found := false
 	err := sh.ForEach(shell.C("ctr", "plugin", "ls"), func(l string) bool {
 		info := strings.Fields(l)
@@ -62,6 +64,10 @@ func TestSnapshotterStartup(t *testing.T) {
 // It verifies that SOCI works when using socket activation and that SOCI starts up correctly when
 // it is configured for socket activation, but it launches directly.
 func TestSnapshotterSystemdStartup(t *testing.T) {
+	if os.Getenv("SKIP_SYSTEMD_TESTS") != "" {
+		t.Skip("Skipping systemd tests")
+	}
+
 	tests := []struct {
 		name                 string
 		init                 func(*shell.Shell)

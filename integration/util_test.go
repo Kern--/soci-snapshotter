@@ -52,6 +52,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/awslabs/soci-snapshotter/config"
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
 	"github.com/awslabs/soci-snapshotter/soci/store"
 	shell "github.com/awslabs/soci-snapshotter/util/dockershell"
@@ -93,6 +94,9 @@ const (
 	ubuntuImage   = "ubuntu:23.04"
 	drupalImage   = "drupal:10.0.2"
 	rabbitmqImage = "rabbitmq:3.11.7"
+	// Pinned version of the cloudwatch agent x86 image that points to a single image manifest
+	cloudwatchAgentx86Image    = "cloudwatch-agent:1.300053.0b1046-amd64"
+	cloudwatchAgentx86ImageRef = "public.ecr.aws/cloudwatch-agent/" + cloudwatchAgentx86Image
 	// Pinned version of rabbitmq that points to a multi architecture index.
 	pinnedRabbitmqImage = "rabbitmq@sha256:19e69a7a65fa6b1d0a5c658bad8ec03d2c9900a98ebbc744c34d49179ff517bf"
 	// These 2 images enable us to test cases where 2 different images
@@ -132,11 +136,6 @@ check_always = true
 [debug]
 format = "json"
 level = "{{.LogLevel}}"
-
-{{.AdditionalConfig}}
-`
-const snapshotterConfigTemplate = `
-disable_verification = {{.DisableVerification}}
 
 {{.AdditionalConfig}}
 `
@@ -315,18 +314,51 @@ func getContainerdConfigToml(t *testing.T, disableVerification bool, additionalC
 	return s
 }
 
-func getSnapshotterConfigToml(t *testing.T, disableVerification bool, additionalConfigs ...string) string {
-	s, err := testutil.ApplyTextTemplate(snapshotterConfigTemplate, struct {
-		DisableVerification bool
-		AdditionalConfig    string
-	}{
-		DisableVerification: disableVerification,
-		AdditionalConfig:    strings.Join(additionalConfigs, "\n"),
-	})
+type snapshotterConfigOpt func(*config.Config)
+
+func withTCPMetrics(cfg *config.Config) {
+	cfg.MetricsAddress = tcpMetricsAddress
+}
+
+func withUnixMetrics(cfg *config.Config) {
+	cfg.MetricsAddress = unixMetricsAddress
+	cfg.MetricsNetwork = "unix"
+}
+
+func withMaxConcurrency(m int64) snapshotterConfigOpt {
+	return func(c *config.Config) {
+		c.ServiceConfig.FSConfig.MaxConcurrency = m
+	}
+}
+
+func withDisableBgFetcher(cfg *config.Config) {
+	cfg.ServiceConfig.FSConfig.BackgroundFetchConfig.Disable = true
+}
+
+func withMinLayerSizeConfig(minLayerSize int64) snapshotterConfigOpt {
+	return func(c *config.Config) {
+		c.ServiceConfig.SnapshotterConfig.MinLayerSize = minLayerSize
+	}
+}
+
+func withFuseWaitDuration(i int64) snapshotterConfigOpt {
+	return func(c *config.Config) {
+		c.ServiceConfig.FSConfig.FuseMetricsEmitWaitDurationSec = i
+	}
+}
+
+func getSnapshotterConfigToml(t *testing.T, opts ...snapshotterConfigOpt) string {
+	// For integ tests, we intentionally don't initialize the config to simulate
+	// a partially filled config like you might find in a real /etc/soci-snapshotter-grpc/config.toml
+	config := config.Config{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	s, err := toml.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s
+	return string(s)
 }
 
 func isTestingBuiltinSnapshotter() bool {
@@ -689,10 +721,14 @@ func generateBasicHtpasswd(user, pass string) ([]byte, error) {
 	return []byte(user + ":" + string(bpass) + "\n"), nil
 }
 
-func getManifestDigest(sh *shell.Shell, ref string, platform spec.Platform) (string, error) {
+func getImageDigest(sh *shell.Shell, ref string) string {
 	buffer := new(bytes.Buffer)
 	sh.Pipe(buffer, []string{"ctr", "image", "list", "name==" + ref}, []string{"awk", `NR==2{printf "%s", $3}`})
-	content := sh.O("ctr", "content", "get", buffer.String())
+	return buffer.String()
+}
+
+func getManifestDigest(sh *shell.Shell, ref string, platform spec.Platform) (string, error) {
+	content := sh.O("ctr", "content", "get", getImageDigest(sh, ref))
 	var index spec.Index
 	err := json.Unmarshal(content, &index)
 	if err != nil {
@@ -904,11 +940,8 @@ func FetchContentByDigest(sh *shell.Shell, contentStoreType store.ContentStoreTy
 	}
 }
 
-func GetContentStoreConfigToml(opts ...store.Option) string {
-	storeConfig := store.NewStoreConfig(opts...)
-	configToml, err := toml.Marshal(storeConfig)
-	if err != nil {
-		return ""
+func withContentStoreConfig(opts ...store.Option) snapshotterConfigOpt {
+	return func(c *config.Config) {
+		c.ServiceConfig.FSConfig.ContentStoreConfig = store.NewStoreConfig(opts...)
 	}
-	return "\n[content_store]\n" + string(configToml)
 }

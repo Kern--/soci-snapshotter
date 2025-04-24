@@ -47,7 +47,7 @@ func TestSequentialResolver(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error build ztoc and section reader: %v", err)
 			}
-			sm := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
+			sm := spanmanager.New("", ztoc, sr, cache.NewMemoryCache(), 0)
 			sequentialResolver := NewSequentialResolver(digest.FromString("test"), sm)
 
 			var resolvedSpans []int

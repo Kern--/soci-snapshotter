@@ -42,7 +42,6 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/defaults"
-	"github.com/containerd/containerd/namespaces"
 )
 
 type FSConfig struct {
@@ -174,8 +173,6 @@ type ContentStoreConfig struct {
 	// ContainerdAddress is the containerd socket address.
 	// Applicable if and only if using containerd content store.
 	ContainerdAddress string `toml:"containerd_address"`
-
-	Namespace string `toml:"namespace"`
 }
 
 func parseFSConfig(cfg *Config) {
@@ -280,13 +277,11 @@ func parseBlobConfig(cfg *Config) {
 
 func parseContentStoreConfig(cfg *Config) {
 	if cfg.ContentStoreConfig.Type == "" {
-		cfg.ContentStoreConfig.Type = DefaultContentStoreType
+		// The snapshotter's default content store is soci until we're confident in the containerd integration
+		cfg.ContentStoreConfig.Type = SociContentStoreType
 	} else if cfg.ContentStoreConfig.Type == ContainerdContentStoreType && cfg.ContentStoreConfig.ContainerdAddress == "" {
 		cfg.ContentStoreConfig.ContainerdAddress = defaults.DefaultAddress
 	} else if cfg.ContentStoreConfig.Type == ContainerdContentStoreType {
 		cfg.ContentStoreConfig.ContainerdAddress = strings.TrimPrefix(cfg.ContentStoreConfig.ContainerdAddress, "unix://")
-	}
-	if cfg.ContentStoreConfig.Namespace == "" {
-		cfg.ContentStoreConfig.Namespace = namespaces.Default
 	}
 }

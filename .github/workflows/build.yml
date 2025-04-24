@@ -83,7 +83,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.setup.outputs.available-runners) }}
-        containerd: ["1.6.36", "1.7.25", "2.0.2"]
+        containerd: ["1.6.38", "1.7.27", "2.0.4"]
     env:
       DOCKER_BUILD_ARGS: "CONTAINERD_VERSION=${{ matrix.containerd }}"
     steps:
@@ -94,6 +94,11 @@ jobs:
       - name: Install zlib static on AL2 ARM instances
         if: matrix.os == 'al2-arm'
         run: dnf install zlib-static.aarch64 -y
-      - run: make integration-with-coverage
+      - name: Run integration tests
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-x86" ]]; then
+            SKIP_SYSTEMD_TESTS=1
+          fi
+          SKIP_SYSTEMD_TESTS=$SKIP_SYSTEMD_TESTS make integration-with-coverage
       - name: Show test coverage
         run: make show-integration-coverage

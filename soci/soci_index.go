@@ -33,6 +33,8 @@ import (
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 	"github.com/containerd/containerd/content"
+
+	//"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
@@ -44,7 +46,13 @@ import (
 
 const (
 	// SociIndexArtifactType is the artifactType of index SOCI index
-	SociIndexArtifactType = "application/vnd.amazon.soci.index.v1+json"
+	SociIndexArtifactType = SociIndexArtifactTypeV1
+	// SociIndexArtifactTypeV1 is the artifact type of a v1 SOCI index which
+	// uses the subject field and the OCI referrers API
+	SociIndexArtifactTypeV1 = "application/vnd.amazon.soci.index.v1+json"
+	// SociIndexArtifactTypeV2 is the artifact type of a v2 SOCI index which
+	// does not contain a subject and instead maintains a reference via an annotation on an image manifest
+	SociIndexArtifactTypeV2 = "application/vnd.amazon.soci.index.v2+json"
 	// SociLayerMediaType is the mediaType of ztoc
 	SociLayerMediaType = "application/octet-stream"
 	// IndexAnnotationImageLayerMediaType is the index annotation for image layer media type
@@ -56,10 +64,19 @@ const (
 	// IndexAnnotationDisableXAttrs is the index annotation if the layer has
 	// extended attributes
 	IndexAnnotationDisableXAttrs = "com.amazon.soci.disable-xattrs"
+	// IndexAnnotationImageDigest is the SOCI index descriptor to indicate the digest
+	// of its associated image. This is useful for v2 SOCI indexes which do not contain
+	// a subject field. This annotation goes on a SOCI index descriptor in an OCI index,
+	// not in the SOCI index itself.
+	IndexAnnotationImageDigest = "com.amazon.soci.image-digest"
+
+	// ImageAnnotationSociIndexDigest is an annotation on image manifests to specify
+	// a SOCI index digest for the image.
+	ImageAnnotationSociIndexDigest = "com.amazon.soci.index-digest"
 
 	defaultSpanSize            = int64(1 << 22) // 4MiB
 	defaultMinLayerSize        = 10 << 20       // 10MiB
-	defaultBuildToolIdentifier = "AWS SOCI CLI v0.1"
+	defaultBuildToolIdentifier = "AWS SOCI CLI v0.2"
 	// emptyJSONObjectDigest is the digest of the content "{}".
 	emptyJSONObjectDigest = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 	// whiteoutOpaqueDir is a special file that indicates that a directory is opaque and all files and subdirectories
@@ -81,12 +98,45 @@ var (
 	defaultConfigContent = []byte("{}")
 	// defaultConfigDescriptor is the descriptor of the of the config object used when
 	// serializing a SOCI index as an OCI 1.0 Manifest for fallback compatibility.
-	defaultConfigDescriptor = ocispec.Descriptor{
+	defaultConfigDescriptor = defaultConfigDescriptorV1
+	// defaultConfigDescriptorV1 is the descriptor of the of the config object used when
+	// serializing a v1 SOCI index as an OCI 1.0 Manifest for fallback compatibility.
+	defaultConfigDescriptorV1 = ocispec.Descriptor{
 		// The Config's media type is set to `SociIndexArtifactType` so that the oras-go
 		// library can use it to filter artifacts.
-		MediaType: SociIndexArtifactType,
+		MediaType: SociIndexArtifactTypeV1,
 		Digest:    emptyJSONObjectDigest,
 		Size:      2,
+	}
+
+	// defaultConfigDescriptorV1 is the descriptor of the of the config object used when
+	// serializing a v2 SOCI index as an OCI 1.0 Manifest for fallback compatibility.
+	defaultConfigDescriptorV2 = ocispec.Descriptor{
+		// The Config's media type is set to `SociIndexArtifactType` so that the oras-go
+		// library can use it to filter artifacts.
+		MediaType: SociIndexArtifactTypeV2,
+		Digest:    emptyJSONObjectDigest,
+		Size:      2,
+	}
+)
+
+// IndexVersion represents the version of an index created by the index builder
+type IndexVersion struct {
+	version          string
+	artifactType     string
+	configDescriptor ocispec.Descriptor
+}
+
+var (
+	V1 = IndexVersion{
+		version:          "v1",
+		artifactType:     SociIndexArtifactTypeV1,
+		configDescriptor: defaultConfigDescriptorV1,
+	}
+	V2 = IndexVersion{
+		version:          "v2",
+		artifactType:     SociIndexArtifactTypeV2,
+		configDescriptor: defaultConfigDescriptorV2,
 	}
 )
 
@@ -106,14 +156,31 @@ type Index struct {
 
 	// Annotations are optional additional metadata for the index.
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	Config ocispec.Descriptor `json:"-"`
 }
 
 // IndexWithMetadata has a soci `Index` and its metadata.
 type IndexWithMetadata struct {
-	Index       *Index
-	Platform    *ocispec.Platform
-	ImageDigest digest.Digest
-	CreatedAt   time.Time
+	// Index is the SOCI index itself
+	Index *Index
+	// Desc is the descriptor for the serialized SOCI index
+	Desc ocispec.Descriptor
+	// Platform is the platform for the SOCI index
+	Platform *ocispec.Platform
+	// ImageDesc is the descriptor of the original image used
+	// to create the SOCI index. This could either be a reference to an image
+	// manifest in the case of single-platorm images or an OCI Index/Docker Manifest List
+	// in the case of multi-platform images. This descriptor is intended for mapping
+	// the SOCI index to a particular image ref, but not necessarily a specific platform.
+	ImageDesc ocispec.Descriptor
+	// ManifestDesc is the descriptor of the original image manifest used
+	// to create the SOCI index. This is the same as the ImageDesc for single-platform images,
+	// but not for multiplatform images. This descriptor always maps to the platform-specific image
+	// manifest that was used when creating the SOCI index. For SOCI v1 indexes, this is the same
+	// as the Subject. For SOCI v2 indexes, this is used in place of the subject.
+	ManifestDesc ocispec.Descriptor
+	CreatedAt    time.Time
 }
 
 // IndexDescriptorInfo has a soci index descriptor and additional metadata.
@@ -144,17 +211,25 @@ func UnmarshalIndex(b []byte, index *Index) error {
 		return err
 	}
 
-	fromManifest(manifest, index)
-	return nil
+	return fromManifest(manifest, index)
 }
 
 // fromManifest converts an OCI 1.0 Manifest to a SOCI Index
-func fromManifest(manifest ocispec.Manifest, index *Index) {
+func fromManifest(manifest ocispec.Manifest, index *Index) error {
 	index.MediaType = manifest.MediaType
-	index.ArtifactType = SociIndexArtifactType
+	switch manifest.Config.MediaType {
+	case V1.artifactType:
+		index.ArtifactType = V1.artifactType
+	case V2.artifactType:
+		index.ArtifactType = V2.artifactType
+	default:
+		return fmt.Errorf("unknown index versio: %s", manifest.Config.MediaType)
+	}
 	index.Blobs = manifest.Layers
 	index.Subject = manifest.Subject
 	index.Annotations = manifest.Annotations
+	index.Config = manifest.Config
+	return nil
 }
 
 // MarshalIndex serializes a SOCI index into a JSON blob.
@@ -163,7 +238,7 @@ func MarshalIndex(i *Index) ([]byte, error) {
 	var manifest ocispec.Manifest
 	manifest.SchemaVersion = 2
 	manifest.MediaType = ocispec.MediaTypeImageManifest
-	manifest.Config = defaultConfigDescriptor
+	manifest.Config = i.Config
 	manifest.Layers = i.Blobs
 	manifest.Subject = i.Subject
 	manifest.Annotations = i.Annotations
@@ -298,13 +373,41 @@ type BuildOption func(*buildConfig) error
 
 // buildConfig represents the config for a single index build operation.
 type buildConfig struct {
-	platform ocispec.Platform
+	platform     ocispec.Platform
+	gcRoot       bool
+	indexVersion IndexVersion
 }
 
 // WithPlatform sets the platform for a single build operation.
 func WithPlatform(platform ocispec.Platform) BuildOption {
 	return func(bc *buildConfig) error {
 		bc.platform = platform
+		return nil
+	}
+}
+
+// WithNoGarbageCollectionLabel prevents the index builder from putting
+// a root GC label on the soci index. The builder will set content GC labels
+// to prevent the ztocs from being garbage collected.
+//
+// The caller is responsible for putting appropriate GC labels to prevent the
+// index from being garbage collected. The caller is also responsible for
+// ensuring that the SOCI index does not get garbage collected after the build finishes,
+// but before the GC label is applied. This can be done by calling `contentStore.BatchOpen`
+// before calling `Build`.
+func WithNoGarbageCollectionLabel() BuildOption {
+	return func(bc *buildConfig) error {
+		bc.gcRoot = false
+		return nil
+	}
+}
+
+// withIndexVersion controls which version of a SOCI index to create in the build.
+// This is set internally by the `Build` and `Convert` APIs and should not
+// be available to external callers
+func withIndexVersion(v IndexVersion) BuildOption {
+	return func(bc *buildConfig) error {
+		bc.indexVersion = v
 		return nil
 	}
 }
@@ -349,6 +452,18 @@ func NewIndexBuilder(contentStore content.Store, blobStore store.Store, opts ...
 // Build builds a soci index for `img` and pushes it with its corresponding zTOCs to the blob store.
 // Returns the SOCI index and its metadata.
 func (b *IndexBuilder) Build(ctx context.Context, img images.Image, opts ...BuildOption) (*IndexWithMetadata, error) {
+	buildCfg := buildConfig{
+		platform:     platforms.DefaultSpec(),
+		gcRoot:       true,
+		indexVersion: V1,
+	}
+	for _, opt := range opts {
+		err := opt(&buildCfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// batch will prevent content from being garbage collected in the middle of the following operations
 	ctx, done, err := b.blobStore.BatchOpen(ctx)
 	if err != nil {
@@ -357,14 +472,14 @@ func (b *IndexBuilder) Build(ctx context.Context, img images.Image, opts ...Buil
 	defer done(ctx)
 
 	// Create and push zTOCs to blob store
-	index, err := b.build(ctx, img, opts...)
+	index, err := b.build(ctx, img, buildCfg)
 	if err != nil {
 		return nil, err
 	}
 
 	// Label zTOCs and push SOCI index
-	err = b.writeSociIndex(ctx, index)
-	if err != nil {
+	index.Desc, err = b.writeSociIndex(ctx, index, buildCfg.gcRoot)
+	if err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
 		return nil, err
 	}
 
@@ -374,17 +489,7 @@ func (b *IndexBuilder) Build(ctx context.Context, img images.Image, opts ...Buil
 // build attempts to create a zTOC in each layer and pushes the zTOC to the blob store.
 // It then creates the SOCI index and returns it with some metadata.
 // This should be done within a Batch and followed by writeSociIndex() to prevent garbage collection.
-func (b *IndexBuilder) build(ctx context.Context, img images.Image, opts ...BuildOption) (*IndexWithMetadata, error) {
-	buildCfg := buildConfig{
-		platform: platforms.DefaultSpec(),
-	}
-	for _, opt := range opts {
-		err := opt(&buildCfg)
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func (b *IndexBuilder) build(ctx context.Context, img images.Image, buildCfg buildConfig) (*IndexWithMetadata, error) {
 	platformMatcher := platforms.OnlyStrict(buildCfg.platform)
 	// we get manifest descriptor before calling images.Manifest, since after calling
 	// images.Manifest, images.Children will error out when reading the manifest blob (this happens on containerd side)
@@ -459,13 +564,19 @@ func (b *IndexBuilder) build(ctx context.Context, img images.Image, opts ...Buil
 		Digest:    imgManifestDesc.Digest,
 		Size:      imgManifestDesc.Size,
 	}
+	if buildCfg.indexVersion.version == V2.version {
+		refers = nil
+	}
 
-	index := NewIndex(ztocsDesc, refers, annotations)
+	index := NewIndex(buildCfg.indexVersion, ztocsDesc, refers, annotations)
+
+	//NewIndex(ztocsDesc, refers, annotations)
 	return &IndexWithMetadata{
-		Index:       index,
-		Platform:    &buildCfg.platform,
-		ImageDigest: img.Target.Digest,
-		CreatedAt:   time.Now(),
+		Index:        index,
+		Platform:     &buildCfg.platform,
+		ImageDesc:    img.Target,
+		ManifestDesc: *imgManifestDesc,
+		CreatedAt:    time.Now(),
 	}, nil
 }
 
@@ -564,13 +675,14 @@ func (b *IndexBuilder) buildSociLayer(ctx context.Context, desc ocispec.Descript
 }
 
 // NewIndex returns a new index.
-func NewIndex(blobs []ocispec.Descriptor, subject *ocispec.Descriptor, annotations map[string]string) *Index {
+func NewIndex(version IndexVersion, blobs []ocispec.Descriptor, subject *ocispec.Descriptor, annotations map[string]string) *Index {
 	return &Index{
 		Blobs:        blobs,
-		ArtifactType: SociIndexArtifactType,
+		ArtifactType: version.artifactType,
 		Annotations:  annotations,
 		Subject:      subject,
 		MediaType:    ocispec.MediaTypeImageManifest,
+		Config:       version.configDescriptor,
 	}
 }
 
@@ -619,43 +731,47 @@ func GetImageManifestDescriptor(ctx context.Context, cs content.Store, imageTarg
 
 // writeSociIndex writes the SociIndex manifest to the blob store.
 // This should be done within a Batch to prevent garbage collection.
-func (b *IndexBuilder) writeSociIndex(ctx context.Context, indexWithMetadata *IndexWithMetadata) error {
+func (b *IndexBuilder) writeSociIndex(ctx context.Context, indexWithMetadata *IndexWithMetadata, gcRoot bool) (ocispec.Descriptor, error) {
 	manifest, err := MarshalIndex(indexWithMetadata.Index)
 	if err != nil {
-		return err
+		return ocispec.Descriptor{}, err
 	}
 
 	// If we're serializing the SOCI index as an OCI 1.0 Manifest, create an
 	// empty config objct in the store as well. We will need to push this to the
 	// registry later.
 	if indexWithMetadata.Index.MediaType == ocispec.MediaTypeImageManifest {
-		err = b.blobStore.Push(ctx, defaultConfigDescriptor, bytes.NewReader(defaultConfigContent))
+		err = b.blobStore.Push(ctx, indexWithMetadata.Index.Config, bytes.NewReader(defaultConfigContent))
 		if err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
-			return fmt.Errorf("error creating OCI 1.0 empty config: %w", err)
+			return ocispec.Descriptor{}, fmt.Errorf("error creating OCI 1.0 empty config: %w", err)
 		}
 	}
 
 	dgst := digest.FromBytes(manifest)
 	size := int64(len(manifest))
 	desc := ocispec.Descriptor{
-		Digest: dgst,
-		Size:   size,
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: indexWithMetadata.Index.ArtifactType,
+		Digest:       dgst,
+		Size:         size,
 	}
 
 	err = b.blobStore.Push(ctx, desc, bytes.NewReader(manifest))
 	if err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
-		return fmt.Errorf("cannot write SOCI index to local store: %w", err)
+		return ocispec.Descriptor{}, fmt.Errorf("cannot write SOCI index to local store: %w", err)
 	}
 
 	log.G(ctx).WithField("digest", dgst.String()).Debugf("soci index has been written")
 
-	err = store.LabelGCRoot(ctx, b.blobStore, desc)
-	if err != nil {
-		return fmt.Errorf("cannot apply garbage collection label to index %s: %w", desc.Digest.String(), err)
+	if gcRoot {
+		err = store.LabelGCRoot(ctx, b.blobStore, desc)
+		if err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("cannot apply garbage collection label to index %s: %w", desc.Digest.String(), err)
+		}
 	}
 	err = store.LabelGCRefContent(ctx, b.blobStore, desc, "config", defaultConfigDescriptor.Digest.String())
 	if err != nil {
-		return fmt.Errorf("cannot apply garbage collection label to index %s referencing default config: %w", desc.Digest.String(), err)
+		return ocispec.Descriptor{}, fmt.Errorf("cannot apply garbage collection label to index %s referencing default config: %w", desc.Digest.String(), err)
 	}
 
 	var allErr error
@@ -666,28 +782,28 @@ func (b *IndexBuilder) writeSociIndex(ctx context.Context, indexWithMetadata *In
 		}
 	}
 	if allErr != nil {
-		return fmt.Errorf("cannot apply one or more garbage collection labels to index %s: %w", desc.Digest.String(), allErr)
+		return ocispec.Descriptor{}, fmt.Errorf("cannot apply one or more garbage collection labels to index %s: %w", desc.Digest.String(), allErr)
 	}
 
 	refers := indexWithMetadata.Index.Subject
 
-	if refers == nil {
-		return errors.New("cannot write soci index: the Refers field is nil")
+	if refers == nil && indexWithMetadata.Index.ArtifactType == SociIndexArtifactTypeV1 {
+		return ocispec.Descriptor{}, errors.New("cannot write soci index: the Refers field is nil")
 	}
 
 	// this entry is persisted to be used by cli push
 	entry := &ArtifactEntry{
 		Digest:         dgst.String(),
-		OriginalDigest: refers.Digest.String(),
-		ImageDigest:    indexWithMetadata.ImageDigest.String(),
+		OriginalDigest: indexWithMetadata.ManifestDesc.Digest.String(),
+		ImageDigest:    indexWithMetadata.ImageDesc.Digest.String(),
 		Platform:       platforms.Format(*indexWithMetadata.Platform),
 		Type:           ArtifactEntryTypeIndex,
-		Location:       refers.Digest.String(),
+		Location:       indexWithMetadata.ManifestDesc.Digest.String(),
 		Size:           size,
 		MediaType:      indexWithMetadata.Index.MediaType,
 		CreatedAt:      indexWithMetadata.CreatedAt,
 	}
-	return b.config.artifactsDb.WriteArtifactEntry(entry)
+	return desc, b.config.artifactsDb.WriteArtifactEntry(entry)
 }
 
 func (b *IndexBuilder) maybeAddDisableXattrAnnotation(ztocDesc *ocispec.Descriptor, ztoc *ztoc.Ztoc) {

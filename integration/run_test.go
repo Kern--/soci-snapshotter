@@ -46,22 +46,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/awslabs/soci-snapshotter/config"
 	"github.com/awslabs/soci-snapshotter/soci/store"
 	shell "github.com/awslabs/soci-snapshotter/util/dockershell"
 	"github.com/awslabs/soci-snapshotter/util/testutil"
 )
 
+// example toml file
+const defaultConfigFileLocation = "../config/config.toml"
+
 func TestRunWithDefaultConfig(t *testing.T) {
-	b, err := os.ReadFile("../config/config.toml") // example toml file
+	defaultConfigToml, err := os.ReadFile(defaultConfigFileLocation)
 	if err != nil {
 		t.Fatalf("error fetching example toml")
 	}
-	config := string(b)
 
 	sh, c := newSnapshotterBaseShell(t)
 	defer c()
 
-	rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, config))
+	rebootContainerd(t, sh, getContainerdConfigToml(t, false), string(defaultConfigToml))
 	// This will error internally if it fails to boot. If it boots successfully,
 	// the config was successfully parsed and snapshotter is running
 }
@@ -120,12 +123,13 @@ func TestRunMultipleContainers(t *testing.T) {
 			sh, done := newShellWithRegistry(t, regConfig)
 			defer done()
 
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics))
 			for _, container := range deduplicateByContainerImage(tt.containers) {
 				// Mirror image
 				copyImage(sh, dockerhub(container.containerImage), regConfig.mirror(container.containerImage))
 				// Pull image, create SOCI index
 				indexDigest := buildIndex(sh, regConfig.mirror(container.containerImage), withMinLayerSize(0))
+				sh.X("soci", "push", "--user", regConfig.mirror(container.containerImage).creds, regConfig.mirror(container.containerImage).ref)
 
 				sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, regConfig.mirror(container.containerImage).ref)...)
 			}
@@ -288,24 +292,22 @@ func TestNetworkRetry(t *testing.T) {
 
 			registryHostIP := getIP(t, sh, regConfig.host)
 
-			config := `
-[blob]
-max_retries   = ` + strconv.Itoa(tt.config.maxRetries) + `
-min_wait_msec = ` + strconv.FormatInt(tt.config.minWaitMsec, 10) + `
-max_wait_msec = ` + strconv.FormatInt(tt.config.maxWaitMsec, 10) + `
+			var withCustomBlobConfig = func(cfg *config.Config) {
+				cfg.ServiceConfig.FSConfig.BlobConfig = config.BlobConfig{
+					MaxRetries:  tt.config.maxRetries,
+					MinWaitMsec: tt.config.minWaitMsec,
+					MaxWaitMsec: tt.config.maxWaitMsec,
+				}
+			}
 
-[background_fetch]
-disable = true
-`
-
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, config))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withCustomBlobConfig, withDisableBgFetcher))
 			// Mirror image
 			copyImage(sh, dockerhub(containerImage), regConfig.mirror(containerImage))
 			image := regConfig.mirror(containerImage).ref
 			indexDigest := buildIndex(sh, regConfig.mirror(containerImage), withMinLayerSize(0), withSpanSize(1<<20))
 			sh.X("soci", "push", "--user", regConfig.creds(), regConfig.mirror(containerImage).ref)
 
-			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, config))
+			rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withCustomBlobConfig, withDisableBgFetcher))
 			// Re-pull image from our local registry mirror
 			sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, regConfig.mirror(containerImage).ref)...)
 
@@ -397,7 +399,7 @@ func TestRootFolderPermission(t *testing.T) {
 	sh, done := newShellWithRegistry(t, regConfig)
 	defer done()
 
-	rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig))
+	rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics))
 	sh.X(append(imagePullCmd, dockerhub(image).ref)...)
 	// This should have all been pulled ahead of time.
 	checkFuseMounts(t, sh, 0)
@@ -417,9 +419,10 @@ func TestRestartAfterSigint(t *testing.T) {
 	sh, done := newShellWithRegistry(t, regConfig)
 	defer done()
 
-	rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false, tcpMetricsConfig))
+	rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, withTCPMetrics))
 	copyImage(sh, dockerhub(containerImage), regConfig.mirror(containerImage))
 	indexDigest := buildIndex(sh, regConfig.mirror(containerImage), withMinLayerSize(0), withSpanSize(100*1024))
+	sh.X("soci", "push", "--user", regConfig.creds(), regConfig.mirror(containerImage).ref)
 	sh.X(append(imagePullCmd, "--soci-index-digest", indexDigest, regConfig.mirror(containerImage).ref)...)
 	testutil.KillMatchingProcess(sh, "soci-snapshotter-grpc")
 
@@ -441,7 +444,7 @@ func TestRestartAfterSigint(t *testing.T) {
 	timeoutCmd := []string{"timeout", "-s", "SIGKILL", startTimeout}
 	cmd := shell.C("/usr/local/bin/soci-snapshotter-grpc", "--log-level", sociLogLevel,
 		"--address", "/run/soci-snapshotter-grpc/soci-snapshotter-grpc.sock")
-	cmd = addConfig(t, sh, getSnapshotterConfigToml(t, false, tcpMetricsConfig), cmd...)
+	cmd = addConfig(t, sh, getSnapshotterConfigToml(t, withTCPMetrics), cmd...)
 	cmd = append(timeoutCmd, cmd...)
 
 	if _, err := sh.OLog(cmd...); err != nil {
@@ -459,7 +462,7 @@ func TestRunInContentStore(t *testing.T) {
 	for _, createContentStoreType := range store.ContentStoreTypes() {
 		for _, runContentStoreType := range store.ContentStoreTypes() {
 			t.Run("create in "+string(createContentStoreType)+", run in "+string(runContentStoreType), func(t *testing.T) {
-				rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, false, tcpMetricsConfig, GetContentStoreConfigToml(store.WithType(runContentStoreType))))
+				rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, withTCPMetrics, withContentStoreConfig(store.WithType(runContentStoreType))))
 				imageInfo := dockerhub(imageName)
 				indexDigest := buildIndex(sh, imageInfo, withMinLayerSize(0), withContentStoreType(createContentStoreType))
 				if indexDigest == "" {
@@ -494,7 +497,7 @@ func TestRunInNamespace(t *testing.T) {
 		for _, createNamespace := range namespaces {
 			for _, runNamespace := range namespaces {
 				t.Run("content store "+string(contentStoreType)+", create in "+createNamespace+", run in "+runNamespace, func(t *testing.T) {
-					rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, false, tcpMetricsConfig, GetContentStoreConfigToml(store.WithType(contentStoreType), store.WithNamespace(runNamespace))))
+					rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, withTCPMetrics, withContentStoreConfig(store.WithType(contentStoreType))))
 					imageInfo := dockerhub(imageName)
 					indexDigest := buildIndex(sh, imageInfo, withMinLayerSize(0), withContentStoreType(contentStoreType), withNamespace(createNamespace))
 					if indexDigest == "" {
@@ -685,7 +688,7 @@ func TestRunWithIdMap(t *testing.T) {
 				sh.Pipe(nil, shell.C("echo", tt.subUIDContents), shell.C("tee", uidPath))
 				sh.Pipe(nil, shell.C("echo", tt.subGIDContents), shell.C("tee", gidPath))
 
-				rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t, false))
+				rebootContainerd(t, sh, getContainerdConfigToml(t, false), getSnapshotterConfigToml(t))
 				imageInfo := dockerhub(tt.imageName)
 				sh.X("nerdctl", "pull", "-q", imageInfo.ref)
 

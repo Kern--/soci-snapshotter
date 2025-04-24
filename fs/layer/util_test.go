@@ -168,7 +168,7 @@ func makeNodeReader(t *testing.T, contents []byte, spanSize int64, factory metad
 	if err != nil {
 		t.Fatalf("failed to create reader: %v", err)
 	}
-	spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
+	spanManager := spanmanager.New("", ztoc, sr, cache.NewMemoryCache(), 0)
 	r, err := reader.NewReader(mr, digest.FromString(""), spanManager, false)
 	if err != nil {
 		mr.Close()
@@ -329,7 +329,7 @@ func testExistenceWithOpaque(t *testing.T, factory metadata.Store, opaque Overla
 					t.Fatalf("failed to create reader: %v", err)
 				}
 				defer mr.Close()
-				spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
+				spanManager := spanmanager.New("", ztoc, sr, cache.NewMemoryCache(), 0)
 				r, err := reader.NewReader(mr, digest.FromString(""), spanManager, false)
 				if err != nil {
 					t.Fatalf("failed to make new reader: %v", err)
