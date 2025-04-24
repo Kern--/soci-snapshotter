@@ -408,12 +408,10 @@ func (m *SpanManager) addSpanToCache(spanID compression.SpanID, contents []byte,
 
 	_, err = w.Write(contents)
 	if err != nil {
-		w.Abort()
-		return err
+		return errors.Join(err, w.Abort())
 	}
 
-	w.Commit()
-	return nil
+	return w.Commit()
 }
 
 // getSpanFromCache returns the cached span content as an `io.Reader`.
